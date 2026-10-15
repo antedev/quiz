@@ -1,0 +1,7 @@
+node_modules/
+dist/
+# Rå API-svar (cache) – återskapas av pipelinen
+data/cache/
+.env
+.env.*
+!.env.example
