@@ -137,6 +137,116 @@ function main() {
     Q10727466: { sv: 'Örebro', en: 'Örebro' }, // Örebro hospital
     Q10612973: { sv: 'Stockholm', en: 'Stockholm' }, // Hedvig Eleonora och Oscars församling
     Q212937: { sv: 'Stockholm', en: 'Stockholm' }, // Klara församling
+    Q11453310: { sv: 'Tokyo', en: 'Tokyo' }, // Hospital of the Imperial Household
+    Q43079570: { sv: 'Nashville, Tennessee', en: 'Nashville, Tennessee' }, // Vanderbilt-Ingram Cancer Center
+    Q13814628: { sv: 'Suzhou (Gusu)', en: 'Suzhou (Gusu)' }, // Gusu / Suzhou
+    Q65415418: { sv: 'Padua (Patavium)', en: 'Padua (Patavium)' }, // Patavium
+    Q50711037: { sv: 'Como (Novum Comum)', en: 'Como (Novum Comum)' }, // Novum Comum
+    Q27088966: { sv: 'Amasya (Amasia)', en: 'Amasya (Amasia)' }, // Amasia
+    Q21711493: { sv: 'Oslo (Christiania)', en: 'Oslo (Christiania)' }, // Christiania
+    Q31897851: { sv: 'Stockholm', en: 'Stockholm' }, // Svea ingenjörkårs församling
+    Q31899080: { sv: 'Stockholm', en: 'Stockholm' }, // Svea livgardes församling
+  };
+
+  /**
+   * Koordinat-fallback för platser i Wikidata som saknar direkta P625-koordinater på själva entiteten
+   * (t.ex. antika stadsnamn som Gusu/Suzhou, Patavium/Padua, historiska riken, sjukhus eller församlingar).
+   */
+  const PLACE_COORD_FALLBACKS: Record<string, [number, number]> = {
+    Q6843510: [34.6811, 135.5003], // Midōsuji, Osaka
+    Q11453310: [35.6875, 139.7564], // Hospital of the Imperial Household, Tokyo
+    Q21711493: [59.9139, 10.7522], // Christiania (Oslo)
+    Q15278: [22.3369, 114.1761], // Kowloon Tong, Hong Kong
+    Q13814628: [31.3041, 120.5954], // Gusu (Suzhou)
+    Q54295687: [22.5525, 75.7564], // Bhim Janmabhoomi (Mhow, Madhya Pradesh)
+    Q2277: [41.8931, 12.4828], // Romerska kejsardömet (Rom)
+    Q65415418: [45.4064, 11.8768], // Patavium (Padua)
+    Q50711037: [45.8081, 9.0852], // Novum Comum (Como)
+    Q106259102: [53.5511, 9.9937], // Meierstraße
+    Q43079570: [36.1408, -86.8019], // Vanderbilt-Ingram Cancer Center (Nashville)
+    Q668: [28.6139, 77.2090], // Indien
+    Q27088966: [40.6539, 35.8331], // Amasia (Amasya)
+    Q4334071: [48.0444, 30.8500], // Olviopol (Pervomajsk)
+    Q227007: [35.3986, 117.1336], // Zhu (Zoucheng, Shandong)
+    Q137795320: [43.1744, -2.2808], // Azpeitia (Loyola)
+    Q23670612: [36.8528, 10.3233], // Roman Carthage
+    Q3008765: [39.4167, 22.5667], // Cynocephalus (Thessalien)
+    Q12974700: [9.2881, 79.3129], // Rameswaram taluk
+    Q510990: [43.2994, 13.4533], // Picenum (Marche)
+    Q68706518: [22.5455, 88.3526], // Kolkata (Sri Aurobindo Bhawan)
+    Q122791820: [35.0253, 135.7636], // Kyoto (Nakayama Residence)
+    Q11240365: [35.6852, 139.7528], // Meiji Palace, Tokyo
+    Q1048669: [41.8931, 12.4828], // Latium
+    Q139428256: [55.7558, 37.6173], // Semenovo
+    Q43114927: [42.8805, -8.5457], // Casa de Santa María
+    Q555994: [38.0800, 46.2919], // Aq Qoyunlu (Tabriz)
+    Q1054923: [22.3193, 114.1694], // British Hong Kong
+    Q116214691: [37.3891, -5.9845], // Spalis (Sevilla)
+    Q41: [37.9838, 23.7275], // Grekland
+    Q184536: [12.6392, -8.0029], // Maliriket
+    Q120227728: [40.5892, -4.1478], // El Escorial
+    Q11266977: [39.6650, 20.8537], // Epirus (Ioannina)
+    Q15782399: [37.0179, -7.9308], // Algarve
+    Q3134997: [-2.5000, 28.8667], // Hewa Bora
+    Q3875016: [47.9212, 106.9186], // Khamag Mongol
+    Q477152: [47.1683, 47.4025], // Sarai
+    Q164092: [51.8667, 12.6500], // Hertigdömet Sachsen (Wittenberg)
+    Q96246887: [24.7136, 46.6753], // Saudiarabien
+    Q97205845: [37.5758, 126.9831], // Andong Byeolgung (Seoul)
+    Q1747689: [41.8931, 12.4828], // Romerska riket
+    Q10646925: [40.8233, 14.1222], // Puteoli (Pozzuoli)
+    Q6645669: [47.2307, 16.6218], // Pannonia Prima (Savaria)
+    Q113490577: [33.9000, 114.5167], // Xianyang County
+    Q16110680: [33.4251, -91.1612], // Guachoya (Mississippi River)
+    Q136690357: [38.9167, 41.1500], // Hatsekats (Taron, Armenien)
+    Q10909621: [38.8672, 106.5269], // Buzhou
+    Q736936: [35.5967, 116.9911], // Lu (Qufu, Shandong)
+    Q11958507: [52.8153, 0.5142], // Appleton House (Sandringham)
+    Q116507919: [40.9833, 29.0333], // Harbor of Eutropius (Chalcedon)
+    Q3775884: [52.8667, -8.2000], // M7 motorway (Tipperary)
+    Q68682: [39.7747, 64.4286], // Buchara
+    Q11768: [30.0444, 31.2357], // Forntida Egypten
+    Q1122052: [47.0000, 35.0000], // Cumania
+    Q119561775: [42.9964, 21.9461], // Bederiana (Justiniana Prima)
+    Q235: [43.7384, 7.4246], // Monaco
+    Q40: [48.2082, 16.3738], // Österrike
+    Q766: [17.9712, -76.7936], // Jamaica
+    Q9352080: [52.6606, 19.0672], // Szpetal (Włocławek)
+    Q33242202: [54.1931, 32.1642], // Kimborovo (Smolensk)
+    Q2014166: [34.7717, 72.3600], // Oddiyana (Swat)
+    Q1016: [32.8872, 13.1913], // Libyen
+    Q38: [41.9028, 12.4964], // Italien
+    Q4307705: [34.2658, 108.9541], // Hangfeng Hall (Chang'an / Xi'an)
+    Q399: [40.1792, 44.4991], // Armenien
+    Q1702716: [53.8425, 14.6150], // Jomsborg (Wolin)
+    Q43: [39.9334, 32.8597], // Turkiet
+    Q12544: [41.0082, 28.9784], // Bysantinska riket (Konstantinopel)
+    Q22: [55.9533, -3.1883], // Skottland
+    Q2866053: [45.7772, 3.0870], // Arvernis (Clermont-Ferrand)
+    Q40169: [36.3594, 43.1528], // Assyria (Nineve)
+    Q12250518: [24.4539, 39.5692], // Wadi al-'Aqiq (Medina)
+    Q858: [33.5138, 36.2765], // Syrien
+    Q16545261: [38.6833, 27.5500], // Korupedion (Lydien)
+    Q660393: [50.7753, 6.0839], // Lower Lotharingia (Aachen)
+    Q23884786: [34.5197, 65.2550], // Ghor (Afghanistan)
+    Q3183526: [33.5138, 36.2765], // Bilad al-Sham (Damaskus)
+    Q111143175: [25.2854, 51.5310], // Beth Qatraye (Qatar)
+    Q171150: [47.4979, 19.0402], // Kungariket Ungern
+    Q7313: [39.9042, 116.4074], // Yuandynastin (Khanbaliq / Peking)
+    Q9672118: [-9.2500, 15.7000], // Caculo Cabaça (Angola)
+    Q973988: [-9.5400, 16.3400], // Kungariket Matamba
+    Q2067184: [43.2141, 27.9147], // Bulgariska imperiet (Preslav)
+    Q1143126: [34.6197, 112.4540], // Senare Tangdynastin (Luoyang)
+    Q10541651: [58.3833, 12.1667], // Jälbolung (Västergötland)
+    Q20089083: [37.5425, -5.0819], // Munda (Andalusien)
+    Q17000558: [36.6972, 45.1417], // Piranshahr (Iran)
+    Q11138161: [58.7289, 23.9503], // Kirbla parish (Estland)
+    Q115051735: [60.5117, 14.2256], // Vansbro
+    Q31897851: [59.3293, 18.0686], // Svea ingenjörkårs församling (Stockholm)
+    Q31899080: [59.3293, 18.0686], // Svea livgardes församling (Stockholm)
+    Q25522569: [57.9258, 26.3292], // Sangaste (Estland)
+    Q36: [52.2297, 21.0122], // Polen
+    Q796: [33.3152, 44.3661], // Irak
   };
 
   const BUILDING_OR_SPOILER_RE =
@@ -157,12 +267,14 @@ function main() {
     // Rangordna kandidater: föredra riktiga städer/orter framför sjukhus, födelsehus och platser med personens eget namn
     const scored = ordered(claims)
       .map((c, idx) => {
+        if (c.value === 'Q24238356') return null; // "okänd" / "unknown" som platsentitet
         const base = ref(c.value);
         if (!base) return null;
         const r = raw.refs[c.value]!;
+        const hasCoord = !!(r.coord || PLACE_COORD_FALLBACKS[c.value]);
         const combined = `${base.name.sv ?? ''} ${base.name.en ?? ''}`.toLowerCase();
         let score = idx === 0 ? 10 : 0;
-        if (r.coord) score += 25;
+        if (hasCoord) score += 25;
         if (base.name.sv) score += 15;
         if (BUILDING_OR_SPOILER_RE.test(combined)) score -= 100;
         if (pTokens.some((w) => combined.includes(w))) score -= 120;
@@ -178,7 +290,8 @@ function main() {
       id: best.claim.value,
       name: overrideName ? { ...best.base.name, ...overrideName } : best.base.name,
     };
-    if (best.r.coord) p.coord = best.r.coord;
+    const coord = best.r.coord ?? PLACE_COORD_FALLBACKS[best.claim.value];
+    if (coord) p.coord = coord;
     const country = best.r.country ? ref(best.r.country) : null;
     if (country) p.country = country;
     return p;

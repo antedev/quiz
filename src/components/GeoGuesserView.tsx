@@ -197,7 +197,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     () => (initialSession?.lifeStatus as LifeStatusFilter) ?? 'historical'
   );
   const [onlySwedish, setOnlySwedish] = useState<boolean>(() => initialSession?.onlySwedish ?? false);
-  const [requireBothCoords, setRequireBothCoords] = useState<boolean>(() => initialSession?.requireBothCoords ?? false);
+  const [requireBothCoords, setRequireBothCoords] = useState<boolean>(() => initialSession?.requireBothCoords ?? true);
 
   const eligiblePeople = useMemo(() => {
     return allPeople.filter((p) => {
@@ -1385,11 +1385,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                       padding: '5px 9px',
                       borderRadius: '10px',
                       background:
-                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || requireBothCoords
+                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || !requireBothCoords
                           ? 'var(--accent-blue)'
                           : '#f8fafc',
                       color:
-                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || requireBothCoords
+                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || !requireBothCoords
                           ? '#fff'
                           : 'var(--text-primary)',
                       border: '1px solid var(--border-color)',
@@ -1709,452 +1709,493 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
         }}
       />
 
-      {/* 2. DESKTOP TOPP-MITTEN OVERLAY: KOMPAKT FAKTA-HUD */}
-      {!isMobile && (
-        <div
-          style={{
-            position: 'absolute',
-            top: '14px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 1000,
-            pointerEvents: 'none',
-            maxWidth: '92vw',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '4px',
-          }}
-        >
-          <div
-            style={{
-              pointerEvents: 'auto',
-              background: '#ffffff',
-              padding: '9px 20px',
-              borderRadius: '999px',
-              border: '2px solid #cbd5e1',
-              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.22)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '12px',
-              fontSize: '0.88rem',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-            }}
-          >
-            {/* Född */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                minWidth: 0,
-                background: '#f0fdf4',
-                border: '1px solid #86efac',
-                padding: '4px 10px',
-                borderRadius: '999px',
-              }}
-            >
-              <span style={{ fontSize: '0.95rem' }}>🐣</span>
-              <strong style={{ color: '#166534', fontWeight: 900, fontSize: '0.94rem' }}>{birthYear}</strong>
-              <span style={{ color: '#0f172a', fontWeight: 700 }}>{safeBirthPlaceLabel}</span>
-            </div>
-
-            <span style={{ color: '#94a3b8', fontWeight: 900, fontSize: '0.95rem' }}>➔</span>
-
-            {/* Död */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                minWidth: 0,
-                background: isLiving ? '#fff1f2' : '#fef2f2',
-                border: isLiving ? '1px solid #fecdd3' : '1px solid #fecaca',
-                padding: '4px 10px',
-                borderRadius: '999px',
-              }}
-            >
-              <span style={{ fontSize: '0.95rem' }}>{isLiving ? '❤️' : '🪦'}</span>
-              <strong style={{ color: isLiving ? '#be123c' : '#991b1b', fontWeight: 900, fontSize: '0.94rem' }}>
-                {isLiving ? (isSv ? 'Levande' : 'Alive') : deathYear}
-              </strong>
-              {!isLiving && <span style={{ color: '#0f172a', fontWeight: 700 }}>{safeDeathPlaceLabel}</span>}
-            </div>
-
-            {/* Divider */}
-            <div style={{ width: '1px', height: '16px', background: '#cbd5e1', flexShrink: 0 }} />
-
-            {/* Livslängd & Sträcka */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
-              <span
-                style={{
-                  background: '#eff6ff',
-                  border: '1px solid #bfdbfe',
-                  color: '#1e40af',
-                  padding: '3px 8px',
-                  borderRadius: '999px',
-                  fontWeight: 800,
-                  fontSize: '0.82rem',
-                }}
-              >
-                {lifespan} {isSv ? 'år' : 'yr'}
-              </span>
-              {distanceKm !== null && (
-                <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 700 }}>
-                  {distanceKm === 0 ? (isSv ? 'Samma ort' : 'Same city') : `${distanceKm.toLocaleString('sv-SE')} km`}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Varning om en ort saknar koordinater */}
-          {(!birthCoord || (!deathCoord && !isLiving)) && (
-            <div
-              style={{
-                pointerEvents: 'auto',
-                background: 'rgba(254, 243, 199, 0.95)',
-                color: '#92400e',
-                border: '1px solid #fde68a',
-                padding: '4px 12px',
-                borderRadius: '999px',
-                fontSize: '0.74rem',
-                fontWeight: 600,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-              }}
-            >
-              <AlertTriangle size={12} />
-              <span>
-                {!birthCoord && !deathCoord
-                  ? isSv
-                    ? 'Inga koordinater'
-                    : 'No coordinates'
-                  : !birthCoord
-                  ? isSv
-                    ? `"${safeBirthPlaceLabel}" saknar koordinater`
-                    : `"${safeBirthPlaceLabel}" lacks coords`
-                  : isSv
-                  ? `"${safeDeathPlaceLabel}" saknar koordinater`
-                  : `"${safeDeathPlaceLabel}" lacks coords`}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 3. DESKTOP SNABBKONTROLLER & FILTER */}
+      {/* 2 & 3. DESKTOP TOPP-OVERLAY: KONTROLLER TILL VÄNSTER & KOMPAKT LIVSRESA-HUD CENTRERAD PÅ KARTYTA (INGEN ÖVERLAPPNING!) */}
       {!isMobile && (
         <div
           style={{
             position: 'absolute',
             top: '14px',
             left: '14px',
+            right: isSidebarOpen ? '413px' : '14px',
             zIndex: 1000,
+            pointerEvents: 'none',
             display: 'flex',
             flexWrap: 'wrap',
-            alignItems: 'center',
-            gap: '6px',
-            background: 'rgba(255, 255, 255, 0.94)',
-            backdropFilter: 'blur(12px)',
-            padding: '6px 10px',
-            borderRadius: '12px',
-            border: '1px solid var(--border-color)',
-            boxShadow: '0 4px 14px rgba(0,0,0,0.12)',
-            maxWidth: 'calc(100vw - 420px)',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: '10px',
           }}
         >
-          {/* Svårighetsgrad: Lätt (Ikoner) / Medel (Allmänbildning) / Svår (Nisch) / Alla */}
-          <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden', opacity: isMatchActive ? 0.55 : 1 }}>
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleTierChange('easy')}
-              style={{
-                padding: '5px 9px',
-                background: selectedTier === 'easy' ? 'var(--accent-blue)' : '#fff',
-                color: selectedTier === 'easy' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                fontWeight: selectedTier === 'easy' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Lätt: Mest kända personerna & ikonerna' : 'Easy: Most famous icons'}
-            >
-              ⭐ {isSv ? 'Lätt' : 'Easy'}
-            </button>
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleTierChange('medium')}
-              style={{
-                padding: '5px 9px',
-                background: selectedTier === 'medium' ? 'var(--accent-blue)' : '#fff',
-                color: selectedTier === 'medium' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                borderLeft: '1px solid var(--border-color)',
-                fontWeight: selectedTier === 'medium' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Medel: God allmänbildning' : 'Medium: General knowledge'}
-            >
-              📚 {isSv ? 'Medel' : 'Med'}
-            </button>
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleTierChange('hard')}
-              style={{
-                padding: '5px 9px',
-                background: selectedTier === 'hard' ? 'var(--accent-blue)' : '#fff',
-                color: selectedTier === 'hard' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                borderLeft: '1px solid var(--border-color)',
-                fontWeight: selectedTier === 'hard' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Svår: Fördjupad nisch & historia' : 'Hard: In-depth & niche'}
-            >
-              🔥 {isSv ? 'Svår' : 'Hard'}
-            </button>
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleTierChange('all')}
-              style={{
-                padding: '5px 9px',
-                background: selectedTier === 'all' ? 'var(--accent-blue)' : '#fff',
-                color: selectedTier === 'all' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                borderLeft: '1px solid var(--border-color)',
-                fontWeight: selectedTier === 'all' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Alla personer' : 'All people'}
-            >
-              {isSv ? 'Alla' : 'All'}
-            </button>
-          </div>
-
-          {/* Århundrade / Sekel Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center', opacity: isMatchActive ? 0.55 : 1 }}>
-            <select
-              disabled={isMatchActive}
-              value={selectedCentury}
-              onChange={(e) => handleCenturyChange(e.target.value)}
-              style={{
-                padding: '5px 8px',
-                borderRadius: '6px',
-                border: '1px solid var(--border-color)',
-                background: selectedCentury !== 'all' ? 'var(--tag-bg)' : '#fff',
-                color: 'var(--text-primary)',
-                fontWeight: 700,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-                outline: 'none',
-              }}
-              title={isSv ? 'Filtrera på personens födelsesekel' : 'Filter by birth century'}
-            >
-              {CENTURIES.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {isSv ? c.label : c.labelEn}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Livsstatus / Spelläge: Historiska (standard) vs Nu levande */}
+          {/* Vänster: Filter (i frispel) ELLER kompakt matchstatus (under pågående 5-ronders match) */}
           <div
             style={{
-              display: 'inline-flex',
-              borderRadius: '6px',
+              pointerEvents: 'auto',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: '6px',
+              background: 'rgba(255, 255, 255, 0.95)',
+              backdropFilter: 'blur(12px)',
+              padding: '6px 10px',
+              borderRadius: '12px',
               border: '1px solid var(--border-color)',
-              overflow: 'hidden',
-              background: '#fff',
-              opacity: isMatchActive ? 0.55 : 1,
+              boxShadow: '0 4px 14px rgba(0,0,0,0.12)',
             }}
           >
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleLifeStatusChange('historical')}
-              style={{
-                padding: '5px 9px',
-                background: lifeStatus === 'historical' ? '#7c2d12' : '#fff',
-                color: lifeStatus === 'historical' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                fontWeight: lifeStatus === 'historical' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Endast historiska (avlidna) personer med komplett livsresa' : 'Only historical (deceased) figures with complete life journeys'}
-            >
-              🏛️ {isSv ? 'Historiska' : 'Historical'}
-            </button>
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleLifeStatusChange('living')}
-              style={{
-                padding: '5px 9px',
-                background: lifeStatus === 'living' ? '#be123c' : '#fff',
-                color: lifeStatus === 'living' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                borderLeft: '1px solid var(--border-color)',
-                fontWeight: lifeStatus === 'living' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Endast nu levande personer (Profil-ledtråd gratis!)' : 'Only living people (free Profile clue!)'}
-            >
-              🌟 {isSv ? 'Nu levande' : 'Living'}
-            </button>
-            <button
-              disabled={isMatchActive}
-              onClick={() => handleLifeStatusChange('all')}
-              style={{
-                padding: '5px 8px',
-                background: lifeStatus === 'all' ? 'var(--accent-blue)' : '#fff',
-                color: lifeStatus === 'all' ? '#fff' : 'var(--text-secondary)',
-                border: 'none',
-                borderLeft: '1px solid var(--border-color)',
-                fontWeight: lifeStatus === 'all' ? 800 : 500,
-                fontSize: '0.76rem',
-                cursor: isMatchActive ? 'not-allowed' : 'pointer',
-              }}
-              title={isSv ? 'Både historiska och nu levande' : 'Both historical and living'}
-            >
-              {isSv ? 'Båda' : 'Both'}
-            </button>
+            {isMatchActive ? (
+              <>
+                <div
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '4px 10px',
+                    borderRadius: '8px',
+                    background: '#eff6ff',
+                    border: '1px solid #bfdbfe',
+                    color: '#1e3a8a',
+                    fontWeight: 800,
+                    fontSize: '0.8rem',
+                  }}
+                >
+                  <Trophy size={14} style={{ color: '#d97706' }} />
+                  <span>
+                    {isSv ? `Match: Rond ${currentRoundIndex + 1} av 5` : `Match: Round ${currentRoundIndex + 1} of 5`}
+                  </span>
+                </div>
+                <span
+                  style={{
+                    padding: '4px 9px',
+                    borderRadius: '8px',
+                    background: '#fffbeb',
+                    border: '1px solid #fde68a',
+                    color: '#92400e',
+                    fontWeight: 800,
+                    fontSize: '0.78rem',
+                  }}
+                >
+                  {matchResults.reduce((sum, r) => sum + r.score, 0)} p
+                </span>
+                <button
+                  onClick={() => {
+                    if (confirm(isSv ? 'Vill du avbryta den pågående matchen?' : 'Do you want to cancel the active match?')) {
+                      cancelMatch();
+                    }
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '5px 10px',
+                    borderRadius: '8px',
+                    background: '#fef2f2',
+                    color: '#b91c1c',
+                    border: '1px solid #fecaca',
+                    fontWeight: 700,
+                    fontSize: '0.75rem',
+                    cursor: 'pointer',
+                  }}
+                  title={isSv ? 'Avbryt pågående match' : 'Cancel active match'}
+                >
+                  <X size={13} />
+                  {isSv ? 'Avbryt' : 'Cancel'}
+                </button>
+              </>
+            ) : (
+              <>
+                {/* Svårighetsgrad: Lätt (Ikoner) / Medel (Allmänbildning) / Svår (Nisch) / Alla */}
+                <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
+                  <button
+                    onClick={() => handleTierChange('easy')}
+                    style={{
+                      padding: '5px 9px',
+                      background: selectedTier === 'easy' ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTier === 'easy' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      fontWeight: selectedTier === 'easy' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Lätt: Mest kända personerna & ikonerna' : 'Easy: Most famous icons'}
+                  >
+                    ⭐ {isSv ? 'Lätt' : 'Easy'}
+                  </button>
+                  <button
+                    onClick={() => handleTierChange('medium')}
+                    style={{
+                      padding: '5px 9px',
+                      background: selectedTier === 'medium' ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTier === 'medium' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      borderLeft: '1px solid var(--border-color)',
+                      fontWeight: selectedTier === 'medium' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Medel: God allmänbildning' : 'Medium: General knowledge'}
+                  >
+                    📚 {isSv ? 'Medel' : 'Med'}
+                  </button>
+                  <button
+                    onClick={() => handleTierChange('hard')}
+                    style={{
+                      padding: '5px 9px',
+                      background: selectedTier === 'hard' ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTier === 'hard' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      borderLeft: '1px solid var(--border-color)',
+                      fontWeight: selectedTier === 'hard' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Svår: Fördjupad nisch & historia' : 'Hard: In-depth & niche'}
+                  >
+                    🔥 {isSv ? 'Svår' : 'Hard'}
+                  </button>
+                  <button
+                    onClick={() => handleTierChange('all')}
+                    style={{
+                      padding: '5px 9px',
+                      background: selectedTier === 'all' ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTier === 'all' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      borderLeft: '1px solid var(--border-color)',
+                      fontWeight: selectedTier === 'all' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Alla personer' : 'All people'}
+                  >
+                    {isSv ? 'Alla' : 'All'}
+                  </button>
+                </div>
+
+                {/* Århundrade / Sekel Dropdown */}
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <select
+                    value={selectedCentury}
+                    onChange={(e) => handleCenturyChange(e.target.value)}
+                    style={{
+                      padding: '5px 8px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border-color)',
+                      background: selectedCentury !== 'all' ? 'var(--tag-bg)' : '#fff',
+                      color: 'var(--text-primary)',
+                      fontWeight: 700,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                      outline: 'none',
+                    }}
+                    title={isSv ? 'Filtrera på personens födelsesekel' : 'Filter by birth century'}
+                  >
+                    {CENTURIES.map((c) => (
+                      <option key={c.value} value={c.value}>
+                        {isSv ? c.label : c.labelEn}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Livsstatus / Spelläge: Historiska (standard) vs Nu levande */}
+                <div
+                  style={{
+                    display: 'inline-flex',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-color)',
+                    overflow: 'hidden',
+                    background: '#fff',
+                  }}
+                >
+                  <button
+                    onClick={() => handleLifeStatusChange('historical')}
+                    style={{
+                      padding: '5px 9px',
+                      background: lifeStatus === 'historical' ? '#7c2d12' : '#fff',
+                      color: lifeStatus === 'historical' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      fontWeight: lifeStatus === 'historical' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Endast historiska (avlidna) personer med komplett livsresa' : 'Only historical (deceased) figures with complete life journeys'}
+                  >
+                    🏛️ {isSv ? 'Historiska' : 'Historical'}
+                  </button>
+                  <button
+                    onClick={() => handleLifeStatusChange('living')}
+                    style={{
+                      padding: '5px 9px',
+                      background: lifeStatus === 'living' ? '#be123c' : '#fff',
+                      color: lifeStatus === 'living' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      borderLeft: '1px solid var(--border-color)',
+                      fontWeight: lifeStatus === 'living' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Endast nu levande personer (Profil-ledtråd gratis!)' : 'Only living people (free Profile clue!)'}
+                  >
+                    🌟 {isSv ? 'Nu levande' : 'Living'}
+                  </button>
+                  <button
+                    onClick={() => handleLifeStatusChange('all')}
+                    style={{
+                      padding: '5px 8px',
+                      background: lifeStatus === 'all' ? 'var(--accent-blue)' : '#fff',
+                      color: lifeStatus === 'all' ? '#fff' : 'var(--text-secondary)',
+                      border: 'none',
+                      borderLeft: '1px solid var(--border-color)',
+                      fontWeight: lifeStatus === 'all' ? 800 : 500,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Både historiska och nu levande' : 'Both historical and living'}
+                  >
+                    {isSv ? 'Båda' : 'Both'}
+                  </button>
+                </div>
+
+                {/* Svensk filter-knapp */}
+                <button
+                  onClick={handleSwedishToggle}
+                  style={{
+                    padding: '5px 9px',
+                    borderRadius: '6px',
+                    border: onlySwedish ? '1px solid #137333' : '1px solid var(--border-color)',
+                    background: onlySwedish ? '#e6f4ea' : '#fff',
+                    color: onlySwedish ? '#137333' : 'var(--text-secondary)',
+                    fontWeight: 700,
+                    fontSize: '0.76rem',
+                    cursor: 'pointer',
+                  }}
+                  title={isSv ? 'Bara personer med svensk koppling' : 'Only Swedish people'}
+                >
+                  🇸🇪 {isSv ? 'Sverige' : 'Sweden'}
+                </button>
+
+                {/* Hel resa filter-knapp (döljs i läget "Nu levande") */}
+                {lifeStatus !== 'living' && (
+                  <button
+                    onClick={() => {
+                      const nextVal = !requireBothCoords;
+                      setRequireBothCoords(nextVal);
+                      if (nextVal && (!currentPerson.birthPlace?.coord || (!currentPerson.deathPlace?.coord && currentPerson.deathDate))) {
+                        const candidates = allPeople.filter((p) => {
+                          if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
+                          if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
+                          if (!matchesLifeStatus(p, lifeStatus)) return false;
+                          if (onlySwedish && !p.swedish) return false;
+                          if (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate)) return false;
+                          return true;
+                        });
+                        if (candidates.length > 0) {
+                          handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
+                        }
+                      }
+                    }}
+                    style={{
+                      padding: '5px 9px',
+                      borderRadius: '6px',
+                      border: requireBothCoords ? '1px solid var(--border-focus)' : '1px solid var(--border-color)',
+                      background: requireBothCoords ? '#fef3c7' : '#fff',
+                      color: requireBothCoords ? '#92400e' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.76rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Kräver både födelse- och dödsort på kartan' : 'Require both coords on map'}
+                  >
+                    🗺️ {isSv ? 'Hel resa' : 'Full journey'}
+                  </button>
+                )}
+
+                {/* Antal matchande personer */}
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  ({eligiblePeople.length} {isSv ? 'st' : ''})
+                </span>
+
+                {/* Ny gåta-knapp */}
+                <button
+                  onClick={() => handleNextPerson()}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '5px 11px',
+                    borderRadius: '6px',
+                    background: 'var(--accent-gold)',
+                    color: '#fff',
+                    border: 'none',
+                    fontWeight: 800,
+                    fontSize: '0.78rem',
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 4px rgba(197, 155, 39, 0.3)',
+                  }}
+                  title={isSv ? 'Slumpa en ny person utifrån dina filter' : 'New random mystery person'}
+                >
+                  <Shuffle size={13} />
+                  {isSv ? 'Ny gåta' : 'New'}
+                </button>
+
+                {/* Spela match-knapp */}
+                <button
+                  onClick={() => {
+                    setMatchCentury(selectedCentury);
+                    setMatchTier(selectedTier);
+                    setMatchLifeStatus(lifeStatus);
+                    setMatchOnlySwedish(onlySwedish);
+                    setShowMatchModal(true);
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '5px 11px',
+                    borderRadius: '6px',
+                    background: '#fff',
+                    color: '#1e3a8a',
+                    border: '1.5px solid #2563eb',
+                    fontWeight: 800,
+                    fontSize: '0.78rem',
+                    cursor: 'pointer',
+                  }}
+                  title={isSv ? 'Starta en match med 5 gåtor' : 'Start a 5-round match'}
+                >
+                  <Trophy size={13} style={{ color: '#2563eb' }} />
+                  {isSv ? '🏆 Spela match (5 gåtor)' : '🏆 Play match (5 rounds)'}
+                </button>
+              </>
+            )}
           </div>
 
-          {/* Svensk filter-knapp */}
-          <button
-            disabled={isMatchActive}
-            onClick={handleSwedishToggle}
-            style={{
-              padding: '5px 9px',
-              borderRadius: '6px',
-              border: onlySwedish ? '1px solid #137333' : '1px solid var(--border-color)',
-              background: onlySwedish ? '#e6f4ea' : '#fff',
-              color: onlySwedish ? '#137333' : 'var(--text-secondary)',
-              fontWeight: 700,
-              fontSize: '0.76rem',
-              opacity: isMatchActive ? 0.55 : 1,
-              cursor: isMatchActive ? 'not-allowed' : 'pointer',
-            }}
-            title={isSv ? 'Bara personer med svensk koppling' : 'Only Swedish people'}
-          >
-            🇸🇪 {isSv ? 'Sverige' : 'Sweden'}
-          </button>
-
-          {/* Hel resa filter-knapp */}
-          <button
-            disabled={isMatchActive}
-            onClick={() => {
-              if (isMatchActive) return;
-              const nextVal = !requireBothCoords;
-              setRequireBothCoords(nextVal);
-              if (nextVal && (!currentPerson.birthPlace?.coord || (!currentPerson.deathPlace?.coord && currentPerson.deathDate))) {
-                const candidates = allPeople.filter((p) => {
-                  if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
-                  if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
-                  if (!matchesLifeStatus(p, lifeStatus)) return false;
-                  if (onlySwedish && !p.swedish) return false;
-                  if (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate)) return false;
-                  return true;
-                });
-                if (candidates.length > 0) {
-                  handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
-                }
-              }
-            }}
-            style={{
-              padding: '5px 9px',
-              borderRadius: '6px',
-              border: requireBothCoords ? '1px solid var(--border-focus)' : '1px solid var(--border-color)',
-              background: requireBothCoords ? '#fef3c7' : '#fff',
-              color: requireBothCoords ? '#92400e' : 'var(--text-secondary)',
-              fontWeight: 700,
-              fontSize: '0.76rem',
-              opacity: isMatchActive ? 0.55 : 1,
-              cursor: isMatchActive ? 'not-allowed' : 'pointer',
-            }}
-            title={isSv ? 'Kräver både födelse- och dödsort på kartan' : 'Require both coords on map'}
-          >
-            🗺️ {isSv ? 'Hel resa' : 'Full journey'}
-          </button>
-
-          {/* Antal matchande personer */}
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-            ({eligiblePeople.length} {isSv ? 'st' : ''})
-          </span>
-
-          {/* Ny gåta-knapp (döljs under pågående match) */}
-          {!isMatchActive && (
-            <button
-              onClick={() => handleNextPerson()}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                padding: '5px 11px',
-                borderRadius: '6px',
-                background: 'var(--accent-gold)',
-                color: '#fff',
-                border: 'none',
-                fontWeight: 800,
-                fontSize: '0.78rem',
-                cursor: 'pointer',
-                boxShadow: '0 2px 4px rgba(197, 155, 39, 0.3)',
-              }}
-              title={isSv ? 'Slumpa en ny person utifrån dina filter' : 'New random mystery person'}
-            >
-              <Shuffle size={13} />
-              {isSv ? 'Ny gåta' : 'New'}
-            </button>
-          )}
-
-          {/* Spela match-knapp */}
-          <button
-            onClick={() => {
-              if (isMatchActive) {
-                if (confirm(isSv ? 'Vill du avbryta den pågående matchen?' : 'Do you want to cancel the active match?')) {
-                  cancelMatch();
-                }
-              } else {
-                setMatchCentury(selectedCentury);
-                setMatchTier(selectedTier);
-                setMatchLifeStatus(lifeStatus);
-                setMatchOnlySwedish(onlySwedish);
-                setShowMatchModal(true);
-              }
-            }}
+          {/* Höger / Mitten: Kompakt Fakta-HUD (Född -> Död + Ålder/Avstånd) */}
+          <div
             style={{
               display: 'flex',
+              flexDirection: 'column',
               alignItems: 'center',
-              gap: '5px',
-              padding: '5px 11px',
-              borderRadius: '6px',
-              background: isMatchActive ? 'linear-gradient(135deg, #1e3a8a, #2563eb)' : '#fff',
-              color: isMatchActive ? '#fff' : '#1e3a8a',
-              border: isMatchActive ? 'none' : '1.5px solid #2563eb',
-              fontWeight: 800,
-              fontSize: '0.78rem',
-              cursor: 'pointer',
-              boxShadow: isMatchActive ? '0 2px 6px rgba(37, 99, 235, 0.35)' : 'none',
+              gap: '4px',
+              margin: '0 auto',
             }}
-            title={isSv ? 'Starta eller hantera en match med 5 gåtor' : 'Start or manage a 5-round match'}
           >
-            <Trophy size={13} style={{ color: isMatchActive ? '#fbbf24' : '#2563eb' }} />
-            {isMatchActive
-              ? isSv
-                ? `Avbryt match (${currentRoundIndex + 1}/5)`
-                : `Cancel match (${currentRoundIndex + 1}/5)`
-              : isSv
-              ? '🏆 Spela match (5 gåtor)'
-              : '🏆 Play match (5 rounds)'}
-          </button>
+            <div
+              style={{
+                pointerEvents: 'auto',
+                background: '#ffffff',
+                padding: '7px 16px',
+                borderRadius: '999px',
+                border: '2px solid #cbd5e1',
+                boxShadow: '0 4px 20px rgba(0, 0, 0, 0.22)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '10px',
+                fontSize: '0.86rem',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+              }}
+            >
+              {/* Född */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  minWidth: 0,
+                  background: '#f0fdf4',
+                  border: '1px solid #86efac',
+                  padding: '4px 10px',
+                  borderRadius: '999px',
+                }}
+              >
+                <span style={{ fontSize: '0.92rem' }}>🐣</span>
+                <strong style={{ color: '#166534', fontWeight: 900, fontSize: '0.92rem' }}>{birthYear}</strong>
+                <span style={{ color: '#0f172a', fontWeight: 700 }}>{safeBirthPlaceLabel}</span>
+              </div>
+
+              <span style={{ color: '#94a3b8', fontWeight: 900, fontSize: '0.92rem' }}>➔</span>
+
+              {/* Död */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  minWidth: 0,
+                  background: isLiving ? '#fff1f2' : '#fef2f2',
+                  border: isLiving ? '1px solid #fecdd3' : '1px solid #fecaca',
+                  padding: '4px 10px',
+                  borderRadius: '999px',
+                }}
+              >
+                <span style={{ fontSize: '0.92rem' }}>{isLiving ? '❤️' : '🪦'}</span>
+                <strong style={{ color: isLiving ? '#be123c' : '#991b1b', fontWeight: 900, fontSize: '0.92rem' }}>
+                  {isLiving ? (isSv ? 'Levande' : 'Alive') : deathYear}
+                </strong>
+                {!isLiving && <span style={{ color: '#0f172a', fontWeight: 700 }}>{safeDeathPlaceLabel}</span>}
+              </div>
+
+              {/* Divider */}
+              <div style={{ width: '1px', height: '16px', background: '#cbd5e1', flexShrink: 0 }} />
+
+              {/* Livslängd & Sträcka */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+                <span
+                  style={{
+                    background: '#eff6ff',
+                    border: '1px solid #bfdbfe',
+                    color: '#1e40af',
+                    padding: '3px 8px',
+                    borderRadius: '999px',
+                    fontWeight: 800,
+                    fontSize: '0.8rem',
+                  }}
+                >
+                  {lifespan} {isSv ? 'år' : 'yr'}
+                </span>
+                {distanceKm !== null && (
+                  <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 700 }}>
+                    {distanceKm === 0 ? (isSv ? 'Samma ort' : 'Same city') : `${distanceKm.toLocaleString('sv-SE')} km`}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Varning om en ort saknar koordinater */}
+            {(!birthCoord || (!deathCoord && !isLiving)) && (
+              <div
+                style={{
+                  pointerEvents: 'auto',
+                  background: 'rgba(254, 243, 199, 0.95)',
+                  color: '#92400e',
+                  border: '1px solid #fde68a',
+                  padding: '4px 12px',
+                  borderRadius: '999px',
+                  fontSize: '0.74rem',
+                  fontWeight: 600,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                }}
+              >
+                <AlertTriangle size={12} />
+                <span>
+                  {!birthCoord && !deathCoord
+                    ? isSv
+                      ? 'Inga koordinater'
+                      : 'No coordinates'
+                    : !birthCoord
+                    ? isSv
+                      ? `"${safeBirthPlaceLabel}" saknar koordinater`
+                      : `"${safeBirthPlaceLabel}" lacks coords`
+                    : isSv
+                    ? `"${safeDeathPlaceLabel}" saknar koordinater`
+                    : `"${safeDeathPlaceLabel}" lacks coords`}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

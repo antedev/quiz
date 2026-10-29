@@ -197,29 +197,109 @@ export const App: React.FC = () => {
         style={{
           background: '#fff',
           borderBottom: '1px solid var(--border-color)',
-          padding: isMobile ? '7px 10px' : '1.25rem 1.5rem',
+          padding: isMobile ? '7px 10px' : '0.85rem 1.5rem',
           position: 'sticky',
           top: 0,
           zIndex: 100,
           boxShadow: 'var(--shadow-sm)',
         }}
       >
-        <div style={{ maxWidth: '1400px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: isMobile ? 'nowrap' : 'wrap', gap: isMobile ? '8px' : '1rem' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: isMobile ? '1.15rem' : '1.5rem' }}>⏳</span>
-              <h1 className="serif-font" style={{ fontSize: isMobile ? '1.05rem' : '1.5rem', fontWeight: 900, color: 'var(--text-primary)', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>
-                LIVSLINJEN
-              </h1>
-              {!isMobile && <span className="badge badge-guess">{isSv ? 'Databas-utforskare' : 'Database Explorer'}</span>}
+        <div style={{ maxWidth: '1400px', margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'nowrap', gap: isMobile ? '8px' : '1rem' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '6px' : '10px' }}>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: isMobile ? '28px' : '36px',
+                  height: isMobile ? '28px' : '36px',
+                  borderRadius: '10px',
+                  background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
+                  color: '#fff',
+                  fontSize: isMobile ? '0.95rem' : '1.15rem',
+                  boxShadow: '0 2px 8px rgba(37, 99, 235, 0.25)',
+                  flexShrink: 0,
+                }}
+              >
+                {viewMode === 'geoguesser' ? '🧭' : viewMode === 'timeline' ? '⏳' : '🏛️'}
+              </span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h1
+                    className="serif-font"
+                    style={{
+                      margin: 0,
+                      fontSize: isMobile ? '1.05rem' : '1.35rem',
+                      fontWeight: 900,
+                      color: 'var(--text-primary)',
+                      letterSpacing: '0.03em',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    LIVSLINJEN
+                  </h1>
+                  {!isMobile && (
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        padding: '2px 9px',
+                        borderRadius: '999px',
+                        fontSize: '0.73rem',
+                        fontWeight: 800,
+                        background:
+                          viewMode === 'geoguesser'
+                            ? '#dbeafe'
+                            : viewMode === 'timeline'
+                            ? '#fef3c7'
+                            : '#f1f5f9',
+                        color:
+                          viewMode === 'geoguesser'
+                            ? '#1e40af'
+                            : viewMode === 'timeline'
+                            ? '#92400e'
+                            : '#334155',
+                        border:
+                          viewMode === 'geoguesser'
+                            ? '1px solid #bfdbfe'
+                            : viewMode === 'timeline'
+                            ? '1px solid #fde68a'
+                            : '1px solid #cbd5e1',
+                      }}
+                    >
+                      {viewMode === 'geoguesser'
+                        ? isSv
+                          ? '🗺️ Geografisk Person-Gåta'
+                          : '🗺️ Historical Geo-Mystery'
+                        : viewMode === 'timeline'
+                        ? isSv
+                          ? '⏳ Interaktiv Tidslinje'
+                          : '⏳ Interactive Timeline'
+                        : isSv
+                        ? '📚 Uppslagsverk'
+                        : '📚 Encyclopedia'}
+                    </span>
+                  )}
+                </div>
+                {!isMobile && (
+                  <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: '1px 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {viewMode === 'geoguesser'
+                      ? isSv
+                        ? 'Följ livsresan på kartan och lista ut vem personen är med så få ledtrådar som möjligt'
+                        : 'Follow the life journey on the map and deduce the mystery figure with minimal clues'
+                      : viewMode === 'timeline'
+                      ? isSv
+                        ? 'Res genom historien år för år och se vilka kända personer som levde samtidigt'
+                        : 'Travel through history year by year and see which famous figures lived at the same time'
+                      : isSv
+                      ? `Utforska och sök bland ${dataset?.counts.total?.toLocaleString('sv-SE') ?? '7 829'} historiska och nutida personer`
+                      : `Explore and search ${dataset?.counts.total?.toLocaleString('en-US') ?? '7,829'} historical and contemporary figures`}
+                  </p>
+                )}
+              </div>
             </div>
-            {!isMobile && (
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                {isSv
-                  ? `Bläddra runt bland ${dataset?.counts.total?.toLocaleString('sv-SE') ?? '7 829'} kurerade historiska personer från Wikidata`
-                  : `Explore ${dataset?.counts.total?.toLocaleString('en-US') ?? '7,829'} curated historical people from Wikidata`}
-              </p>
-            )}
           </div>
 
           {/* Visningsläge (Kort vs Tidslinje), Profilknapp, Språkväxlare & Slumpa-knapp */}
