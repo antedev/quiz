@@ -1,38 +1,35 @@
-import React, { useState } from 'react';
-import type { Person } from '../types/person.ts';
-import { formatDate, generateClues } from '../engine/clues.ts';
-import { MapPin, Briefcase, Award, Eye, Calendar, Sparkles, User, ExternalLink, Globe } from 'lucide-react';
+import React from 'react';
+import { loc, type Person } from '../types/person.ts';
+import { MapPin, Award, Eye, Calendar, User, Globe } from 'lucide-react';
 
 interface PersonCardProps {
   person: Person;
-  allPeople: Person[];
+  allPeople?: Person[];
   lang: 'sv' | 'en';
+  isSolved?: boolean;
   onInspect: (person: Person) => void;
 }
 
-export const PersonCard: React.FC<PersonCardProps> = ({ person, allPeople, lang, onInspect }) => {
-  const [showClues, setShowClues] = useState(false);
+export const PersonCard: React.FC<PersonCardProps> = ({ person, lang, isSolved, onInspect }) => {
   const isSv = lang === 'sv';
 
-  const name = person.name[lang] || person.name.sv || person.name.en || 'Okänd';
-  const desc = person.description[lang] || person.description.sv || person.description.en || '';
-  const birthPlace = person.birthPlace?.name[lang] || person.birthPlace?.name.sv || person.birthPlace?.name.en;
-  const deathPlace = person.deathPlace?.name[lang] || person.deathPlace?.name.sv || person.deathPlace?.name.en;
-  const occupations = person.occupations.map((o) => o.name[lang] || o.name.sv || o.name.en).filter(Boolean);
-  const works = person.notableWorks.map((w) => w.name[lang] || w.name.sv || w.name.en).filter(Boolean);
+  const name = loc(person.name, lang, isSv ? 'Okänd' : 'Unknown');
+  const desc = loc(person.description, lang);
+  const birthPlace = loc(person.birthPlace?.name, lang);
+  const deathPlace = loc(person.deathPlace?.name, lang);
+  const occupations = person.occupations.map((o) => loc(o.name, lang)).filter(Boolean);
+  const works = person.notableWorks.map((w) => loc(w.name, lang)).filter(Boolean);
 
   const birthYear = person.birthDate.year;
   const deathYear = person.deathDate?.year;
   const lifespan = deathYear ? deathYear - birthYear : (new Date().getFullYear() - birthYear);
-
-  const clues = showClues ? generateClues(person, allPeople, lang) : [];
 
   return (
     <div
       style={{
         background: 'var(--bg-card)',
         borderRadius: '14px',
-        border: '1px solid var(--border-color)',
+        border: isSolved ? '1.5px solid #16a34a' : '1px solid var(--border-color)',
         boxShadow: 'var(--shadow-sm)',
         display: 'flex',
         flexDirection: 'column',
@@ -55,18 +52,37 @@ export const PersonCard: React.FC<PersonCardProps> = ({ person, allPeople, lang,
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          background: '#faf6ed',
+          background: isSolved ? '#f0fdf4' : '#faf6ed',
           borderBottom: '1px solid var(--border-color)',
           fontSize: '0.75rem',
         }}
       >
-        <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-          <span className={`badge ${person.tier === 'guess' ? 'badge-guess' : 'badge-ref'}`}>
-            {person.tier === 'guess' ? (isSv ? 'Nivå 1: Gissning' : 'Tier 1: Guess') : (isSv ? 'Nivå 2: Referens' : 'Tier 2: Ref')}
+        <div style={{ display: 'flex', gap: '5px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span className={`badge ${person.tier === 'easy' ? 'badge-guess' : person.tier === 'medium' ? 'badge-med' : 'badge-ref'}`}>
+            {person.tier === 'easy'
+              ? (isSv ? '⭐ Lätt' : '⭐ Easy')
+              : person.tier === 'medium'
+              ? (isSv ? '📚 Medel' : '📚 Med')
+              : (isSv ? '🔥 Svår' : '🔥 Hard')}
           </span>
           {person.swedish && (
             <span className="badge badge-swedish">
               🇸🇪 {isSv ? 'Sverige' : 'Sweden'}
+            </span>
+          )}
+          {isSolved && (
+            <span
+              style={{
+                background: '#dcfce7',
+                color: '#166534',
+                border: '1px solid #86efac',
+                padding: '1px 6px',
+                borderRadius: '999px',
+                fontWeight: 800,
+                fontSize: '0.7rem',
+              }}
+            >
+              ✓ {isSv ? 'Löst' : 'Solved'}
             </span>
           )}
         </div>
@@ -144,7 +160,14 @@ export const PersonCard: React.FC<PersonCardProps> = ({ person, allPeople, lang,
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '4px' }}>
             <Calendar size={13} style={{ color: 'var(--accent-gold-dark)', flexShrink: 0 }} />
             <span style={{ fontWeight: 600 }}>
-              {birthYear} – {deathYear ? deathYear : (isSv ? 'nu levande' : 'alive')}
+              {birthYear < 0 ? `${Math.abs(birthYear)} ${isSv ? 'f.Kr.' : 'BC'}` : birthYear} –{' '}
+              {deathYear
+                ? deathYear < 0
+                  ? `${Math.abs(deathYear)} ${isSv ? 'f.Kr.' : 'BC'}`
+                  : deathYear
+                : isSv
+                ? 'nu levande'
+                : 'alive'}
             </span>
             <span
               style={{
@@ -156,7 +179,7 @@ export const PersonCard: React.FC<PersonCardProps> = ({ person, allPeople, lang,
                 fontWeight: 700,
               }}
             >
-              {lifespan} år
+              {lifespan} {isSv ? 'år' : 'yrs'}
             </span>
           </div>
 
@@ -219,58 +242,12 @@ export const PersonCard: React.FC<PersonCardProps> = ({ person, allPeople, lang,
           </div>
         )}
 
-        {/* Ledtråds-panel (om uppfälld) */}
-        {showClues && (
-          <div
-            style={{
-              marginTop: '0.5rem',
-              padding: '0.75rem',
-              background: 'var(--bg-subtle)',
-              borderRadius: '8px',
-              border: '1px dashed var(--border-color)',
-              fontSize: '0.8rem',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '0.4rem',
-            }}
-          >
-            <div style={{ fontWeight: 700, color: 'var(--accent-gold-dark)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <Sparkles size={14} /> {isSv ? 'Hur ledtrådarna ser ut i spelet:' : 'In-game clues preview:'}
-            </div>
-            {clues.map((c) => (
-              <div key={c.level} style={{ borderBottom: '1px solid #e2d7c0', paddingBottom: '3px' }}>
-                <span style={{ fontWeight: 700, color: 'var(--accent-blue)' }}>{c.points}p:</span> {c.text}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Knappar i botten */}
+        {/* Knapp i botten */}
         <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
-          <button
-            onClick={() => setShowClues(!showClues)}
-            style={{
-              flex: 1,
-              padding: '7px 10px',
-              borderRadius: '6px',
-              border: '1px solid var(--border-color)',
-              background: showClues ? 'var(--tag-bg)' : '#fff',
-              color: 'var(--text-primary)',
-              fontSize: '0.78rem',
-              fontWeight: 600,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '4px',
-            }}
-          >
-            <Sparkles size={13} />
-            {showClues ? (isSv ? 'Dölj ledtrådar' : 'Hide clues') : (isSv ? 'Ledtrådar' : 'Clues')}
-          </button>
-
           <button
             onClick={() => onInspect(person)}
             style={{
+              flex: 1,
               padding: '7px 12px',
               borderRadius: '6px',
               border: '1px solid var(--border-focus)',

@@ -1,7 +1,7 @@
 import React from 'react';
-import type { Person } from '../types/person.ts';
-import { formatDate, generateClues } from '../engine/clues.ts';
-import { X, Calendar, MapPin, Briefcase, Award, Globe, ExternalLink, Sparkles, Shield, User } from 'lucide-react';
+import { loc, QUIZ_CATEGORIES, type Person } from '../types/person.ts';
+import { formatDate, findContemporaries } from '../engine/clues.ts';
+import { X, Calendar, MapPin, Globe, ExternalLink, Users, User } from 'lucide-react';
 
 interface PersonModalProps {
   person: Person | null;
@@ -21,21 +21,24 @@ export const PersonModal: React.FC<PersonModalProps> = ({
   if (!person) return null;
   const isSv = lang === 'sv';
 
-  const name = person.name[lang] || person.name.sv || person.name.en || 'Okänd';
-  const desc = person.description[lang] || person.description.sv || person.description.en || '';
-  const clues = generateClues(person, allPeople, lang);
+  const name = loc(person.name, lang, isSv ? 'Okänd' : 'Unknown');
+  const desc = loc(person.description, lang);
+  const contemporaries = findContemporaries(person, allPeople, 3, lang);
 
-  const birthPlace = person.birthPlace?.name[lang] || person.birthPlace?.name.sv || person.birthPlace?.name.en;
-  const deathPlace = person.deathPlace?.name[lang] || person.deathPlace?.name.sv || person.deathPlace?.name.en;
-  const occupations = person.occupations.map((o) => o.name[lang] || o.name.sv || o.name.en).filter(Boolean);
-  const citizenship = person.citizenship.map((c) => c.name[lang] || c.name.sv || c.name.en).filter(Boolean);
-  const works = person.notableWorks.map((w) => w.name[lang] || w.name.sv || w.name.en).filter(Boolean);
-  const causes = person.causeOfDeath.map((c) => c.name[lang] || c.name.sv || c.name.en).filter(Boolean);
-  const manners = person.mannerOfDeath.map((m) => m.name[lang] || m.name.sv || m.name.en).filter(Boolean);
+  const birthPlace = loc(person.birthPlace?.name, lang);
+  const birthCountry = loc(person.birthPlace?.country?.name, lang);
+  const deathPlace = loc(person.deathPlace?.name, lang);
+  const deathCountry = loc(person.deathPlace?.country?.name, lang);
+  const occupations = person.occupations.map((o) => loc(o.name, lang)).filter(Boolean);
+  const citizenship = person.citizenship.map((c) => loc(c.name, lang)).filter(Boolean);
+  const works = person.notableWorks.map((w) => loc(w.name, lang)).filter(Boolean);
+  const causes = person.causeOfDeath.map((c) => loc(c.name, lang)).filter(Boolean);
+  const manners = person.mannerOfDeath.map((m) => loc(m.name, lang)).filter(Boolean);
 
-  const wikiTitle = person.wiki[lang] || person.wiki.sv || person.wiki.en;
+  const wikiLang = person.wiki[lang] ? lang : (person.wiki.sv ? 'sv' : 'en');
+  const wikiTitle = person.wiki[wikiLang];
   const wikiUrl = wikiTitle
-    ? `https://${person.wiki.sv ? 'sv' : 'en'}.wikipedia.org/wiki/${encodeURIComponent(wikiTitle.replace(/ /g, '_'))}`
+    ? `https://${wikiLang}.wikipedia.org/wiki/${encodeURIComponent(wikiTitle.replace(/ /g, '_'))}`
     : `https://www.wikidata.org/wiki/${person.id}`;
 
   return (
@@ -121,12 +124,24 @@ export const PersonModal: React.FC<PersonModalProps> = ({
 
             <div style={{ padding: '1.25rem', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
               <div style={{ display: 'flex', gap: '6px', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
-                <span className={`badge ${person.tier === 'guess' ? 'badge-guess' : 'badge-ref'}`}>
-                  {person.tier === 'guess' ? 'Gissnings-pool (Nivå 1)' : 'Referens-pool (Nivå 2)'}
+                <span className={`badge ${person.tier === 'easy' ? 'badge-guess' : person.tier === 'medium' ? 'badge-med' : 'badge-ref'}`}>
+                  {person.tier === 'easy'
+                    ? (isSv ? '⭐ Lätt (Ikon & Kändis)' : '⭐ Easy (Icon)')
+                    : person.tier === 'medium'
+                    ? (isSv ? '📚 Medel (Allmänbildning)' : '📚 Medium (General)')
+                    : (isSv ? '🔥 Svår (Nisch & Historia)' : '🔥 Hard (Niche)')}
                 </span>
-                {person.swedish && <span className="badge badge-swedish">🇸🇪 Svensk koppling</span>}
+                {person.categories && person.categories.map((cat) => {
+                  const info = QUIZ_CATEGORIES[cat] || QUIZ_CATEGORIES.other;
+                  return (
+                    <span key={cat} className="badge" style={{ background: '#e0f2fe', color: '#0369a1', fontWeight: 700 }}>
+                      {info.icon} {info[lang] || info.sv}
+                    </span>
+                  );
+                })}
+                {person.swedish && <span className="badge badge-swedish">🇸🇪 {isSv ? 'Svensk koppling' : 'Swedish connection'}</span>}
                 <span className="badge badge-ref">
-                  <Globe size={11} /> {person.sitelinks} Wikipedia-språk
+                  <Globe size={11} /> {person.sitelinks} {isSv ? 'Wikipedia-språk' : 'Wikipedia languages'}
                 </span>
               </div>
 
@@ -145,7 +160,7 @@ export const PersonModal: React.FC<PersonModalProps> = ({
                   <strong>{formatDate(person.birthDate, lang)}</strong> – <strong>{formatDate(person.deathDate, lang)}</strong>
                   {person.deathDate && (
                     <span style={{ color: 'var(--text-muted)', marginLeft: '6px' }}>
-                      (blev {person.deathDate.year - person.birthDate.year} år)
+                      ({isSv ? `blev ${person.deathDate.year - person.birthDate.year} år` : `aged ${person.deathDate.year - person.birthDate.year}`})
                     </span>
                   )}
                 </span>
@@ -201,7 +216,7 @@ export const PersonModal: React.FC<PersonModalProps> = ({
               </div>
               <div style={{ fontWeight: 600, marginTop: '2px' }}>
                 {birthPlace || (isSv ? 'Ej angivet' : 'Unknown')}
-                {person.birthPlace?.country?.name[lang] && ` (${person.birthPlace.country.name[lang]})`}
+                {birthCountry && ` (${birthCountry})`}
               </div>
               {person.birthPlace?.coord && (
                 <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
@@ -216,7 +231,7 @@ export const PersonModal: React.FC<PersonModalProps> = ({
               </div>
               <div style={{ fontWeight: 600, marginTop: '2px' }}>
                 {deathPlace || (isSv ? 'Ej angivet' : 'Unknown')}
-                {person.deathPlace?.country?.name[lang] && ` (${person.deathPlace.country.name[lang]})`}
+                {deathCountry && ` (${deathCountry})`}
               </div>
               {person.deathPlace?.coord && (
                 <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
@@ -279,31 +294,30 @@ export const PersonModal: React.FC<PersonModalProps> = ({
             </div>
           )}
 
-          {/* Förhandsgranskning av Spelläge 1: Ledtrådar */}
-          <div style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '1rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, color: 'var(--accent-gold-dark)', marginBottom: '0.6rem' }}>
-              <Sparkles size={16} />
-              <span>{isSv ? 'Genererade ledtrådar för "Vem är personen?":' : 'Generated clues for "Who is this person?":'}</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              {clues.map((c) => (
-                <div key={c.level} style={{ display: 'flex', gap: '10px', fontSize: '0.85rem', background: '#fff', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e5dac6' }}>
-                  <div style={{ fontWeight: 800, color: 'var(--accent-blue)', minWidth: '35px' }}>{c.points}p</div>
-                  <div style={{ flex: 1 }}>
-                    <span style={{ fontWeight: 600, color: 'var(--text-secondary)', marginRight: '6px' }}>[{c.category}]</span>
-                    {c.text}
+          {/* Samtida kända personer (Tidskompisar) */}
+          {contemporaries.length > 0 && (
+            <div style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, color: 'var(--accent-gold-dark)', marginBottom: '0.6rem' }}>
+                <Users size={16} />
+                <span>{isSv ? 'Samtida kända personer (Tidskompisar):' : 'Famous Contemporaries:'}</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {contemporaries.map((c, idx) => (
+                  <div key={c.person.id || idx} style={{ display: 'flex', gap: '10px', fontSize: '0.85rem', background: '#fff', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e5dac6' }}>
+                    <span style={{ color: 'var(--accent-blue)', fontWeight: 700 }}>⏳</span>
+                    <div style={{ flex: 1, color: 'var(--text-primary)' }}>{c.relationship}</div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Bildlicens & Externa länkar */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.75rem', borderTop: '1px solid var(--border-color)', fontSize: '0.78rem', color: 'var(--text-muted)', flexWrap: 'wrap', gap: '0.5rem' }}>
             <div>
               {person.image?.license && (
                 <span>
-                  Bild: {person.image.license} {person.image.artist && `• ${person.image.artist}`}
+                  {isSv ? 'Bild:' : 'Image:'} {person.image.license} {person.image.artist && `• ${person.image.artist}`}
                 </span>
               )}
             </div>

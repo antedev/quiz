@@ -1,6 +1,8 @@
 {
   "$comment": "Manuell kurering. forceGuess/forceReference: Q-ID:n som alltid tas med i respektive pool. exclude: tas aldrig med. patches: rättelser som skrivs över genererad data, t.ex. { \"Q123\": { \"description\": { \"sv\": \"...\" } } }. Ska senare kunna redigeras i ett admin-gränssnitt.",
-  "forceGuess": [],
+  "forceGuess": [
+    "Q209518"
+  ],
   "forceReference": [],
   "exclude": [],
   "patches": {}

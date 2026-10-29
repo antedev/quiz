@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { config } from './config.ts';
 import { sparql, qid } from './lib/sparql.ts';
 import { CACHE_DIR, DATA_DIR, readJson, writeJson } from './lib/util.ts';
-import type { Tier } from '../src/types/person.ts';
+import type { PoolTier } from '../src/types/person.ts';
 
 export interface Candidate {
   id: string;
@@ -28,7 +28,7 @@ export interface Overrides {
 
 export interface Selection {
   generatedAt: string;
-  people: { id: string; tier: Tier }[];
+  people: { id: string; tier: PoolTier }[];
 }
 
 const swedishFilter = config.swedishCountries.map((c) => `wd:${c}`).join(', ');

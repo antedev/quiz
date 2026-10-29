@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import type { Person } from '../types/person.ts';
-import { Play, Pause, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Search, User, ExternalLink, Calendar, MapPin, Sparkles, ArrowDownCircle, Info } from 'lucide-react';
+import { loc, type Person } from '../types/person.ts';
+import { Play, Pause, ChevronLeft, ChevronRight, ArrowDownCircle } from 'lucide-react';
 
 interface TimelineViewProps {
   people: Person[];
@@ -9,8 +9,12 @@ interface TimelineViewProps {
 }
 
 const HISTORIC_PRESETS = [
+  { year: -44, label: '-44 (Julius Caesar)' },
+  { year: 330, label: '330 (Konstantinopel)' },
+  { year: 800, label: '800 (Karl den store)' },
+  { year: 1066, label: '1066 (Slaget vid Hastings)' },
   { year: 1350, label: '1350 (Digerdöden)' },
-  { year: 1453, label: '1453 (Konstantinopel)' },
+  { year: 1453, label: '1453 (Konstantinopel faller)' },
   { year: 1492, label: '1492 (Columbus)' },
   { year: 1523, label: '1523 (Gustav Vasa)' },
   { year: 1632, label: '1632 (Lützen)' },
@@ -23,15 +27,22 @@ const HISTORIC_PRESETS = [
   { year: 2000, label: '2000 (Millennium)' },
 ];
 
-const MIN_YEAR = 1000;
+const MIN_YEAR = -800;
 const MAX_YEAR = 2026;
 const ROW_HEIGHT = 44; // Höjd per personrad
-const SIDEBAR_WIDTH = 240; // Klibbig namn-kolumn till vänster
 const BUFFER_ROWS = 25; // Buffert för virtualiserad rendering
 
 export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInspect }) => {
   const isSv = lang === 'sv';
   const currentYear = new Date().getFullYear();
+
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const SIDEBAR_WIDTH = isMobile ? 140 : 240;
 
   const [selectedYear, setSelectedYear] = useState<number>(1700);
   const [pxPerYear, setPxPerYear] = useState<number>(16); // Zoom (pixlar per år: 8, 16, 26)
@@ -52,22 +63,22 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInsp
 
   const yearToPx = useCallback((year: number) => {
     return SIDEBAR_WIDTH + (year - MIN_YEAR) * pxPerYear;
-  }, [pxPerYear]);
+  }, [SIDEBAR_WIDTH, pxPerYear]);
 
   const pxToYear = useCallback((px: number) => {
     const timelinePx = px - SIDEBAR_WIDTH;
     return Math.round(MIN_YEAR + timelinePx / pxPerYear);
-  }, [pxPerYear]);
+  }, [SIDEBAR_WIDTH, pxPerYear]);
 
   // Sorterad och filtrerad lista över alla personer (FÖRST FÖDD LÄNGST UPP)
   const allSortedPeople = useMemo(() => {
     const list = people.filter((p) => {
       if (onlySwedish && !p.swedish) return false;
-      if (onlyGuessTier && p.tier !== 'guess') return false;
+      if (onlyGuessTier && p.tier !== 'easy' && p.tier !== 'medium') return false;
       if (search.trim()) {
         const q = search.toLowerCase();
-        const name = (p.name[lang] || p.name.sv || p.name.en || '').toLowerCase();
-        const occ = p.occupations.map((o) => (o.name[lang] || o.name.sv || '').toLowerCase()).join(' ');
+        const name = loc(p.name, lang).toLowerCase();
+        const occ = p.occupations.map((o) => loc(o.name, lang).toLowerCase()).join(' ');
         if (!name.includes(q) && !occ.includes(q)) return false;
       }
       return true;
@@ -268,7 +279,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInsp
                   lineHeight: 1,
                 }}
               >
-                År {selectedYear}
+                {selectedYear < 0
+                  ? `${Math.abs(selectedYear)} ${isSv ? 'f.Kr.' : 'BC'}`
+                  : `${isSv ? 'År' : 'Year'} ${selectedYear}`}
               </div>
               <div style={{ fontSize: '0.78rem', color: '#1E3A5F', fontWeight: 700, marginTop: '2px' }}>
                 {aliveCount} {isSv ? 'personer levde då' : 'people alive'}
@@ -531,7 +544,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInsp
                         color: isCentury ? '#1E3A5F' : 'var(--text-muted)',
                       }}
                     >
-                      {t}
+                      {t < 0 ? `${Math.abs(t)} ${isSv ? 'f.Kr.' : 'BC'}` : t}
                     </span>
                     <div
                       style={{
@@ -563,7 +576,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInsp
                   pointerEvents: 'none',
                 }}
               >
-                År {selectedYear}
+                {selectedYear < 0
+                  ? `${Math.abs(selectedYear)} ${isSv ? 'f.Kr.' : 'BC'}`
+                  : `${isSv ? 'År' : 'Year'} ${selectedYear}`}
               </div>
             </div>
           </div>
@@ -617,7 +632,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInsp
             const endX = yearToPx(death);
             const width = Math.max(70, endX - startX);
 
-            const name = p.name[lang] || p.name.sv || p.name.en || 'Okänd';
+            const name = loc(p.name, lang, isSv ? 'Okänd' : 'Unknown');
             const ageAtSelected = isAliveAtSelected ? selectedYear - birth : null;
 
             return (

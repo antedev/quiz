@@ -71,9 +71,13 @@ async function main() {
   const allIds = selection.people.map((p) => p.id);
   const missingPeopleIds = allIds.filter((id) => !cached.people[id]);
 
-  if (missingPeopleIds.length > 0) {
-    console.log(`Hämtar data för ${missingPeopleIds.length} personer (av ${allIds.length})...`);
-    const batches = chunk(missingPeopleIds, 50);
+  const limitArg = process.argv.find((a) => a.startsWith('--limit='));
+  const maxToFetch = limitArg ? parseInt(limitArg.split('=')[1] ?? '', 10) || undefined : undefined;
+  const toFetchIds = maxToFetch ? missingPeopleIds.slice(0, maxToFetch) : missingPeopleIds;
+
+  if (toFetchIds.length > 0) {
+    console.log(`Hämtar data för ${toFetchIds.length} personer (av ${missingPeopleIds.length} som saknas i urvalet på ${allIds.length})...`);
+    const batches = chunk(toFetchIds, 50);
 
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i]!;
@@ -141,11 +145,12 @@ async function main() {
         cached.people[id] = { labels, descriptions, wiki, dates, claims };
       }
 
-      if ((i + 1) % 10 === 0 || i === batches.length - 1) {
-        console.log(`  Personer: batch ${i + 1}/${batches.length} klar (${((Date.now() - t) / 1000).toFixed(2)}s)`);
-        writeJson(cacheFile, cached, false);
-      }
-      await sleep(150);
+      const elapsed = ((Date.now() - t) / 1000).toFixed(1);
+      const cachedCount = Object.keys(cached.people).length;
+      const pct = Math.round((cachedCount / allIds.length) * 100);
+      console.log(`  [Batch ${i + 1}/${batches.length}] +${batch.length} personer (${cachedCount}/${allIds.length} – ${pct}%) [${elapsed}s]`);
+      writeJson(cacheFile, cached, false);
+      await sleep(650);
     }
   } else {
     console.log(`Alla ${allIds.length} personer fanns redan i cachen.`);
@@ -197,11 +202,11 @@ async function main() {
         cached.refs[id] = ref;
       }
 
-      if ((i + 1) % 10 === 0 || i === refBatches.length - 1) {
-        console.log(`  Referenser: batch ${i + 1}/${refBatches.length} klar`);
+      if ((i + 1) % 2 === 0 || i === refBatches.length - 1) {
+        console.log(`  [Referenser ${i + 1}/${refBatches.length}] (${Object.keys(cached.refs).length} referenser sparade)`);
         writeJson(cacheFile, cached, false);
       }
-      await sleep(150);
+      await sleep(650);
     }
   }
 
@@ -213,7 +218,8 @@ async function main() {
   if (missingCountryIds.size > 0) {
     console.log(`Hämtar ${missingCountryIds.size} länder som saknas...`);
     const cBatches = chunk([...missingCountryIds], 50);
-    for (const batch of cBatches) {
+    for (let i = 0; i < cBatches.length; i++) {
+      const batch = cBatches[i]!;
       const entities = await fetchEntitiesBatch(batch);
       for (const id of batch) {
         const e = entities[id];
@@ -223,7 +229,8 @@ async function main() {
         if (e.labels?.en?.value) labels.en = e.labels.en.value;
         cached.refs[id] = { labels };
       }
-      await sleep(150);
+      console.log(`  [Länder ${i + 1}/${cBatches.length}]`);
+      await sleep(650);
     }
   }
 

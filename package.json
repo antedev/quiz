@@ -14,7 +14,8 @@
     "data:build": "tsx pipeline/04-build.ts",
     "data:wiki": "tsx pipeline/05-wikipedia.ts",
     "data": "npm run data:candidates && npm run data:entities && npm run data:media && npm run data:build && npm run data:wiki",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -23,7 +24,8 @@
     "@vitejs/plugin-react": "^6.1.2",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vite": "^8.3.4"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "@types/leaflet": "^1.9.22",

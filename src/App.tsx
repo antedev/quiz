@@ -1,31 +1,57 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import type { PeopleDataset, Person, Tier } from './types/person.ts';
+import { loc, type PeopleDataset, type Person, type Tier } from './types/person.ts';
 import { PersonCard } from './components/PersonCard.tsx';
 import { PersonModal } from './components/PersonModal.tsx';
+import { ProfileModal } from './components/ProfileModal.tsx';
 import { TimelineView } from './components/TimelineView.tsx';
 import { GeoGuesserView } from './components/GeoGuesserView.tsx';
-import { Search, Shuffle, Filter, SlidersHorizontal, Users, Sparkles, BookOpen, Flag, CheckCircle2, ChevronDown, LayoutGrid, Clock, Compass } from 'lucide-react';
+import { Search, Shuffle, Users, ChevronDown, LayoutGrid, Clock, Compass } from 'lucide-react';
+
+import { loadAppState, saveAppState } from './engine/sessionPersistence.ts';
+import {
+  loadProfileState,
+  getActiveProfile,
+  updateActiveProfile,
+  createProfile,
+  switchProfile,
+  deleteProfile,
+  recordRoundInState,
+  recordMatchInState,
+  importProfileData,
+} from './engine/profileStore.ts';
 
 const CENTURIES = [
-  { label: 'Alla sekler', value: 'all' },
-  { label: '1000–1200-talet', value: 'early' },
-  { label: '1300-talet', value: '1300' },
-  { label: '1400-talet', value: '1400' },
-  { label: '1500-talet', value: '1500' },
-  { label: '1600-talet', value: '1600' },
-  { label: '1700-talet', value: '1700' },
-  { label: '1800-talet', value: '1800' },
-  { label: '1900-talet', value: '1900' },
-  { label: '2000-talet', value: '2000' },
+  { labelSv: 'Alla epoker', labelEn: 'All eras', value: 'all' },
+  { labelSv: 'Antiken (< 500)', labelEn: 'Antiquity (< 500)', value: 'antiquity' },
+  { labelSv: '500–1200-talet', labelEn: '500–1200s', value: 'early' },
+  { labelSv: '1300-talet', labelEn: '1300s', value: '1300' },
+  { labelSv: '1400-talet', labelEn: '1400s', value: '1400' },
+  { labelSv: '1500-talet', labelEn: '1500s', value: '1500' },
+  { labelSv: '1600-talet', labelEn: '1600s', value: '1600' },
+  { labelSv: '1700-talet', labelEn: '1700s', value: '1700' },
+  { labelSv: '1800-talet', labelEn: '1800s', value: '1800' },
+  { labelSv: '1900-talet', labelEn: '1900s', value: '1900' },
+  { labelSv: '2000-talet', labelEn: '2000s', value: '2000' },
 ];
 
 export const App: React.FC = () => {
+  const [initialApp] = useState(() => loadAppState());
+  const [profileState, setProfileState] = useState(() => loadProfileState());
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+
+  const activeProfile = useMemo(() => getActiveProfile(profileState), [profileState]);
+  const solvedPersonIdsSet = useMemo(() => new Set(activeProfile.solvedPersonIds), [activeProfile.solvedPersonIds]);
+
   const [dataset, setDataset] = useState<PeopleDataset | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [lang, setLang] = useState<'sv' | 'en'>('sv');
-  const [viewMode, setViewMode] = useState<'geoguesser' | 'timeline' | 'cards'>('geoguesser');
+  const [lang, setLang] = useState<'sv' | 'en'>(() => initialApp.lang ?? 'sv');
+  const [viewMode, setViewMode] = useState<'geoguesser' | 'timeline' | 'cards'>(() => initialApp.viewMode ?? 'geoguesser');
   const [geoGuesserPersonId, setGeoGuesserPersonId] = useState<string | null>(null);
+
+  useEffect(() => {
+    saveAppState({ lang, viewMode });
+  }, [lang, viewMode]);
 
   // Filter-tillstånd
   const [search, setSearch] = useState('');
@@ -33,6 +59,7 @@ export const App: React.FC = () => {
   const [selectedTier, setSelectedTier] = useState<'all' | Tier>('all');
   const [onlySwedish, setOnlySwedish] = useState(false);
   const [onlyLiving, setOnlyLiving] = useState(false);
+  const [onlySolved, setOnlySolved] = useState(false);
   const [sortBy, setSortBy] = useState<'fame' | 'birth_asc' | 'birth_desc' | 'name'>('fame');
 
   // Paginering / Hur många som visas i taget
@@ -74,11 +101,11 @@ export const App: React.FC = () => {
       // Söksträng
       if (search.trim()) {
         const q = search.toLowerCase();
-        const pName = (p.name[lang] || p.name.sv || p.name.en || '').toLowerCase();
-        const pDesc = (p.description[lang] || p.description.sv || p.description.en || '').toLowerCase();
-        const pBirthPlace = (p.birthPlace?.name[lang] || p.birthPlace?.name.sv || '').toLowerCase();
-        const pOcc = p.occupations.map((o) => (o.name[lang] || o.name.sv || '').toLowerCase()).join(' ');
-        const pWorks = p.notableWorks.map((w) => (w.name[lang] || w.name.sv || '').toLowerCase()).join(' ');
+        const pName = loc(p.name, lang).toLowerCase();
+        const pDesc = loc(p.description, lang).toLowerCase();
+        const pBirthPlace = loc(p.birthPlace?.name, lang).toLowerCase();
+        const pOcc = p.occupations.map((o) => loc(o.name, lang).toLowerCase()).join(' ');
+        const pWorks = p.notableWorks.map((w) => loc(w.name, lang).toLowerCase()).join(' ');
         if (!pName.includes(q) && !pDesc.includes(q) && !pBirthPlace.includes(q) && !pOcc.includes(q) && !pWorks.includes(q)) {
           return false;
         }
@@ -87,8 +114,11 @@ export const App: React.FC = () => {
       // Sekelfilter
       if (selectedCentury !== 'all') {
         const by = p.birthDate.year;
-        if (selectedCentury === 'early' && by >= 1300) return false;
-        if (selectedCentury !== 'early') {
+        if (selectedCentury === 'antiquity') {
+          if (by >= 500) return false;
+        } else if (selectedCentury === 'early') {
+          if (by < 500 || by >= 1300) return false;
+        } else {
           const targetCent = Number(selectedCentury);
           if (by < targetCent || by >= targetCent + 100) return false;
         }
@@ -103,9 +133,12 @@ export const App: React.FC = () => {
       // Levande-filter
       if (onlyLiving && p.deathDate !== null) return false;
 
+      // Lösta-filter
+      if (onlySolved && !solvedPersonIdsSet.has(p.id)) return false;
+
       return true;
     });
-  }, [people, search, selectedCentury, selectedTier, onlySwedish, onlyLiving, lang]);
+  }, [people, search, selectedCentury, selectedTier, onlySwedish, onlyLiving, onlySolved, solvedPersonIdsSet, lang]);
 
   // Sortering
   const sortedPeople = useMemo(() => {
@@ -118,9 +151,9 @@ export const App: React.FC = () => {
       list.sort((a, b) => b.birthDate.year - a.birthDate.year);
     } else if (sortBy === 'name') {
       list.sort((a, b) => {
-        const na = a.name[lang] || a.name.sv || a.name.en || '';
-        const nb = b.name[lang] || b.name.sv || b.name.en || '';
-        return na.localeCompare(nb, 'sv');
+        const na = loc(a.name, lang);
+        const nb = loc(b.name, lang);
+        return na.localeCompare(nb, lang);
       });
     }
     return list;
@@ -139,9 +172,11 @@ export const App: React.FC = () => {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: '1rem' }}>
         <h2 className="serif-font" style={{ fontSize: '1.75rem', color: 'var(--accent-gold-dark)' }}>
-          Laddar Wikidata-databasen...
+          {isSv ? 'Laddar Wikidata-databasen...' : 'Loading Wikidata database...'}
         </h2>
-        <p style={{ color: 'var(--text-secondary)' }}>Läser in 4 097 historiska personer...</p>
+        <p style={{ color: 'var(--text-secondary)' }}>
+          {isSv ? 'Läser in 7 829 historiska personer...' : 'Loading 7,829 historical people...'}
+        </p>
       </div>
     );
   }
@@ -149,7 +184,7 @@ export const App: React.FC = () => {
   if (error) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--accent-red)' }}>
-        <h2>Ett fel uppstod vid inläsning</h2>
+        <h2>{isSv ? 'Ett fel uppstod vid inläsning' : 'An error occurred while loading'}</h2>
         <p>{error}</p>
       </div>
     );
@@ -157,7 +192,6 @@ export const App: React.FC = () => {
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* Topp-header */}
       {/* Topp-header */}
       <header
         style={{
@@ -177,18 +211,18 @@ export const App: React.FC = () => {
               <h1 className="serif-font" style={{ fontSize: isMobile ? '1.05rem' : '1.5rem', fontWeight: 900, color: 'var(--text-primary)', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>
                 LIVSLINJEN
               </h1>
-              {!isMobile && <span className="badge badge-guess">Databas-utforskare</span>}
+              {!isMobile && <span className="badge badge-guess">{isSv ? 'Databas-utforskare' : 'Database Explorer'}</span>}
             </div>
             {!isMobile && (
               <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
                 {isSv
-                  ? 'Bläddra runt bland 4 097 kurerade historiska personer från Wikidata'
-                  : 'Explore 4,097 curated historical people from Wikidata'}
+                  ? `Bläddra runt bland ${dataset?.counts.total?.toLocaleString('sv-SE') ?? '7 829'} kurerade historiska personer från Wikidata`
+                  : `Explore ${dataset?.counts.total?.toLocaleString('en-US') ?? '7,829'} curated historical people from Wikidata`}
               </p>
             )}
           </div>
 
-          {/* Visningsläge (Kort vs Tidslinje), Språkväxlare & Slumpa-knapp */}
+          {/* Visningsläge (Kort vs Tidslinje), Profilknapp, Språkväxlare & Slumpa-knapp */}
           <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '6px' : '0.75rem', flexWrap: 'nowrap' }}>
             {/* Vy-väljare */}
             <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
@@ -198,16 +232,17 @@ export const App: React.FC = () => {
                   display: 'flex',
                   alignItems: 'center',
                   gap: '4px',
-                  padding: isMobile ? '5px 7px' : '7px 13px',
+                  minHeight: isMobile ? '34px' : undefined,
+                  padding: isMobile ? '6px 9px' : '7px 13px',
                   background: viewMode === 'geoguesser' ? 'var(--accent-blue)' : '#fff',
                   color: viewMode === 'geoguesser' ? '#fff' : 'var(--text-secondary)',
                   border: 'none',
                   fontWeight: viewMode === 'geoguesser' ? 700 : 500,
-                  fontSize: isMobile ? '0.75rem' : '0.85rem',
+                  fontSize: isMobile ? '0.78rem' : '0.85rem',
                 }}
                 title="GeoGuesser"
               >
-                <Compass size={isMobile ? 13 : 15} />
+                <Compass size={isMobile ? 14 : 15} />
                 <span>{isMobile ? 'Geo' : 'GeoGuesser'}</span>
               </button>
               <button
@@ -216,17 +251,18 @@ export const App: React.FC = () => {
                   display: 'flex',
                   alignItems: 'center',
                   gap: '4px',
-                  padding: isMobile ? '5px 7px' : '7px 12px',
+                  minHeight: isMobile ? '34px' : undefined,
+                  padding: isMobile ? '6px 9px' : '7px 12px',
                   background: viewMode === 'timeline' ? 'var(--accent-blue)' : '#fff',
                   color: viewMode === 'timeline' ? '#fff' : 'var(--text-secondary)',
                   border: 'none',
                   borderLeft: '1px solid var(--border-color)',
                   fontWeight: viewMode === 'timeline' ? 700 : 500,
-                  fontSize: isMobile ? '0.75rem' : '0.85rem',
+                  fontSize: isMobile ? '0.78rem' : '0.85rem',
                 }}
                 title={isSv ? 'Tidslinje' : 'Timeline'}
               >
-                <Clock size={isMobile ? 13 : 15} />
+                <Clock size={isMobile ? 14 : 15} />
                 <span>{isMobile ? 'Tid' : (isSv ? 'Tidslinje' : 'Timeline')}</span>
               </button>
               <button
@@ -235,22 +271,23 @@ export const App: React.FC = () => {
                   display: 'flex',
                   alignItems: 'center',
                   gap: '4px',
-                  padding: isMobile ? '5px 7px' : '7px 12px',
+                  minHeight: isMobile ? '34px' : undefined,
+                  padding: isMobile ? '6px 9px' : '7px 12px',
                   background: viewMode === 'cards' ? 'var(--accent-blue)' : '#fff',
                   color: viewMode === 'cards' ? '#fff' : 'var(--text-secondary)',
                   border: 'none',
                   borderLeft: '1px solid var(--border-color)',
                   fontWeight: viewMode === 'cards' ? 700 : 500,
-                  fontSize: isMobile ? '0.75rem' : '0.85rem',
+                  fontSize: isMobile ? '0.78rem' : '0.85rem',
                 }}
                 title={isSv ? 'Kortvy' : 'Cards'}
               >
-                <LayoutGrid size={isMobile ? 13 : 15} />
+                <LayoutGrid size={isMobile ? 14 : 15} />
                 <span>{isMobile ? 'Kort' : (isSv ? 'Kortvy' : 'Cards')}</span>
               </button>
             </div>
 
-            {!isMobile && (
+            {!isMobile && viewMode !== 'geoguesser' && (
               <button
                 onClick={handleRandomCard}
                 style={{
@@ -272,15 +309,55 @@ export const App: React.FC = () => {
               </button>
             )}
 
-            <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
+            {/* Spelarprofil & Statistik-knapp */}
+            <button
+              onClick={() => setIsProfileModalOpen(true)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: isMobile ? '5px' : '7px',
+                minHeight: isMobile ? '34px' : undefined,
+                padding: isMobile ? '5px 8px' : '6px 12px',
+                borderRadius: '8px',
+                border: '1px solid var(--border-color)',
+                background: '#f8fafc',
+                color: 'var(--text-primary)',
+                fontWeight: 700,
+                fontSize: isMobile ? '0.78rem' : '0.83rem',
+                cursor: 'pointer',
+              }}
+              title={isSv ? 'Öppna spelarprofil, poäng & samling' : 'Open player profile, scores & collection'}
+            >
+              <span style={{ fontSize: isMobile ? '0.95rem' : '1.05rem' }}>{activeProfile.avatar}</span>
+              {!isMobile && (
+                <span style={{ maxWidth: '110px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {activeProfile.name}
+                </span>
+              )}
+              <span
+                style={{
+                  background: '#dcfce7',
+                  color: '#166534',
+                  padding: '1px 6px',
+                  borderRadius: '999px',
+                  fontSize: '0.72rem',
+                  fontWeight: 800,
+                }}
+              >
+                ✓ {activeProfile.solvedPersonIds.length}
+              </span>
+            </button>
+
+            <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
               <button
                 onClick={() => setLang('sv')}
                 style={{
-                  padding: isMobile ? '4px 6px' : '6px 10px',
+                  minHeight: isMobile ? '34px' : undefined,
+                  padding: isMobile ? '6px 8px' : '6px 10px',
                   background: lang === 'sv' ? 'var(--tag-bg)' : '#fff',
                   border: 'none',
                   fontWeight: lang === 'sv' ? 700 : 400,
-                  fontSize: isMobile ? '0.72rem' : '0.8rem',
+                  fontSize: isMobile ? '0.8rem' : '0.8rem',
                 }}
                 title="Svenska"
               >
@@ -289,11 +366,12 @@ export const App: React.FC = () => {
               <button
                 onClick={() => setLang('en')}
                 style={{
-                  padding: isMobile ? '4px 6px' : '6px 10px',
+                  minHeight: isMobile ? '34px' : undefined,
+                  padding: isMobile ? '6px 8px' : '6px 10px',
                   background: lang === 'en' ? 'var(--tag-bg)' : '#fff',
                   border: 'none',
                   fontWeight: lang === 'en' ? 700 : 400,
-                  fontSize: isMobile ? '0.72rem' : '0.8rem',
+                  fontSize: isMobile ? '0.8rem' : '0.8rem',
                 }}
                 title="English"
               >
@@ -307,22 +385,26 @@ export const App: React.FC = () => {
         {!isMobile && viewMode !== 'geoguesser' && (
           <div style={{ maxWidth: '1400px', margin: '0.75rem auto 0', display: 'flex', gap: '8px', flexWrap: 'wrap', fontSize: '0.78rem' }}>
             <span style={{ color: 'var(--text-muted)' }}>{isSv ? 'I databasen:' : 'In database:'}</span>
-            <span className="badge badge-ref">Totalt: {dataset?.counts.total}</span>
-            <span className="badge badge-guess">Gissnings-pool: {dataset?.counts.guess}</span>
-            <span className="badge badge-ref">Referens-pool: {dataset?.counts.reference}</span>
-            <span className="badge badge-swedish">Svenska: {dataset?.counts.swedish}</span>
-            <span className="badge badge-living">Nu levande: {dataset?.counts.living}</span>
-            <span className="badge badge-ref">Med porträtt: {dataset?.counts.withImage}</span>
+            <span className="badge badge-ref">{isSv ? 'Totalt' : 'Total'}: {dataset?.counts.total}</span>
+            <span className="badge badge-guess">⭐ {isSv ? 'Lätt' : 'Easy'}: {dataset?.counts.easy}</span>
+            <span className="badge badge-med">📚 {isSv ? 'Medel' : 'Medium'}: {dataset?.counts.medium}</span>
+            <span className="badge badge-ref">🔥 {isSv ? 'Svår' : 'Hard'}: {dataset?.counts.hard}</span>
+            <span className="badge badge-swedish">🇸🇪 {isSv ? 'Svenska' : 'Swedish'}: {dataset?.counts.swedish}</span>
+            <span className="badge badge-living">❤️ {isSv ? 'Nu levande' : 'Living'}: {dataset?.counts.living}</span>
+            <span className="badge badge-ref">🖼️ {isSv ? 'Med porträtt' : 'With portrait'}: {dataset?.counts.withImage}</span>
           </div>
         )}
       </header>
 
       {viewMode === 'geoguesser' ? (
-        <main style={{ height: isMobile ? 'calc(100dvh - 46px)' : 'calc(100vh - 74px)', width: '100%', position: 'relative', overflow: 'hidden' }}>
+        <main style={{ height: isMobile ? 'calc(100svh - 49px)' : 'calc(100vh - 74px)', width: '100%', position: 'relative', overflow: 'hidden' }}>
           <GeoGuesserView
             allPeople={people}
             lang={lang}
             initialPersonId={geoGuesserPersonId}
+            solvedPersonIds={solvedPersonIdsSet}
+            onRoundComplete={(round) => setProfileState((prev) => recordRoundInState(prev, round))}
+            onMatchComplete={(match) => setProfileState((prev) => recordMatchInState(prev, match))}
             onInspectPerson={(person) => setInspectedPerson(person)}
             onBackToExplorer={() => setViewMode('timeline')}
           />
@@ -403,18 +485,28 @@ export const App: React.FC = () => {
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {c.label}
+                    {isSv ? c.labelSv : c.labelEn}
                   </button>
                 ))}
               </div>
 
-              {/* Rad 3: Snabbfilter (Nivå, Svensk, Levande) */}
+              {/* Rad 3: Snabbfilter (Nivå, Svensk, Levande, Lösta) */}
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', fontSize: '0.82rem' }}>
                 <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>{isSv ? 'Filter:' : 'Filters:'}</span>
 
                 {/* Nivå */}
                 <button
-                  onClick={() => setSelectedTier(selectedTier === 'all' ? 'guess' : selectedTier === 'guess' ? 'reference' : 'all')}
+                  onClick={() =>
+                    setSelectedTier(
+                      selectedTier === 'all'
+                        ? 'easy'
+                        : selectedTier === 'easy'
+                        ? 'medium'
+                        : selectedTier === 'medium'
+                        ? 'hard'
+                        : 'all'
+                    )
+                  }
                   style={{
                     padding: '4px 10px',
                     borderRadius: '6px',
@@ -423,7 +515,13 @@ export const App: React.FC = () => {
                     fontWeight: 600,
                   }}
                 >
-                  {selectedTier === 'all' ? 'Alla nivåer' : selectedTier === 'guess' ? '🎯 Bara Gissnings-poolen' : '📚 Bara Referens-poolen'}
+                  {selectedTier === 'all'
+                    ? (isSv ? 'Alla nivåer' : 'All tiers')
+                    : selectedTier === 'easy'
+                    ? (isSv ? '⭐ Bara Lätt' : '⭐ Only Easy')
+                    : selectedTier === 'medium'
+                    ? (isSv ? '📚 Bara Medel' : '📚 Only Medium')
+                    : (isSv ? '🔥 Bara Svår' : '🔥 Only Hard')}
                 </button>
 
                 {/* Svensk */}
@@ -456,8 +554,23 @@ export const App: React.FC = () => {
                   ❤️ {isSv ? 'Bara nu levande' : 'Only living'}
                 </button>
 
+                {/* Upptäckta / Lösta i GeoGuesser */}
+                <button
+                  onClick={() => setOnlySolved(!onlySolved)}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    border: onlySolved ? '1px solid #16a34a' : '1px solid var(--border-color)',
+                    background: onlySolved ? '#dcfce7' : '#fff',
+                    color: onlySolved ? '#166534' : 'inherit',
+                    fontWeight: 600,
+                  }}
+                >
+                  ✓ {isSv ? `Lösta i GeoGuesser (${solvedPersonIdsSet.size})` : `Solved (${solvedPersonIdsSet.size})`}
+                </button>
+
                 {/* Återställ-knapp */}
-                {(search || selectedCentury !== 'all' || selectedTier !== 'all' || onlySwedish || onlyLiving) && (
+                {(search || selectedCentury !== 'all' || selectedTier !== 'all' || onlySwedish || onlyLiving || onlySolved) && (
                   <button
                     onClick={() => {
                       setSearch('');
@@ -465,6 +578,7 @@ export const App: React.FC = () => {
                       setSelectedTier('all');
                       setOnlySwedish(false);
                       setOnlyLiving(false);
+                      setOnlySolved(false);
                     }}
                     style={{
                       padding: '4px 10px',
@@ -510,6 +624,7 @@ export const App: React.FC = () => {
                   person={p}
                   allPeople={people}
                   lang={lang}
+                  isSolved={solvedPersonIdsSet.has(p.id)}
                   onInspect={(person) => setInspectedPerson(person)}
                 />
               ))}
@@ -546,6 +661,31 @@ export const App: React.FC = () => {
       </main>
     </>
   )}
+
+      {/* Modal för spelarprofil, poäng & samling */}
+      <ProfileModal
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
+        profileState={profileState}
+        allPeople={people}
+        lang={lang}
+        onUpdateProfile={(updates) => setProfileState((prev) => updateActiveProfile(prev, updates))}
+        onCreateProfile={(name, avatar) => setProfileState((prev) => createProfile(prev, name, avatar))}
+        onSwitchProfile={(id) => setProfileState((prev) => switchProfile(prev, id))}
+        onDeleteProfile={(id) => setProfileState((prev) => deleteProfile(prev, id))}
+        onImportProfile={(jsonStr) => {
+          const next = importProfileData(profileState, jsonStr);
+          if (next) {
+            setProfileState(next);
+            return true;
+          }
+          return false;
+        }}
+        onInspectPerson={(person) => {
+          setIsProfileModalOpen(false);
+          setInspectedPerson(person);
+        }}
+      />
 
       {/* Modal för detaljgranskning */}
       <PersonModal

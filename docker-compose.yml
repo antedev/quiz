@@ -1,0 +1,9 @@
+services:
+  livslinjen-quiz:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: livslinjen-quiz
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8088:80"

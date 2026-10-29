@@ -81,11 +81,11 @@ async function main() {
     }
     // Filer som inte kom tillbaka alls markeras som saknade så vi inte frågar i evighet.
     for (const f of batch) if (!(f in media)) media[f] = null;
-    if ((i + 1) % 10 === 0 || i === batches.length - 1) {
-      console.log(`  batch ${i + 1}/${batches.length}`);
+    console.log(`  [Bilder ${i + 1}/${batches.length}] (${Object.keys(media).length} bilder sparade)`);
+    if ((i + 1) % 2 === 0 || i === batches.length - 1) {
       writeJson(mediaPath, media, false);
     }
-    await sleep(200);
+    await sleep(400);
   }
   writeJson(mediaPath, media, false);
   console.log('Klart: data/cache/media.json');

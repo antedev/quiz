@@ -43,80 +43,19 @@ interface ActionQueryResponse {
   };
 }
 
-export function cleanExtractParagraphs(extract: string): string {
-  if (!extract) return '';
-  const paragraphs = extract
-    .split(/\n+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  const clean = paragraphs.filter((p) => {
-    if (/^Uppslagsord(?:et|en)\b/i.test(p)) return false;
-    if (/^För andra betydelser\b/i.test(p)) return false;
-    if (/^Den här artikeln handlar om\b/i.test(p)) return false;
-    if (/^För (?:artikeln om|staden|filmen|boken)\b/i.test(p)) return false;
-    if (/^This article is about\b/i.test(p)) return false;
-    if (/^For other uses\b/i.test(p)) return false;
-    return true;
-  });
-
-  // Ta max de 2 första styckena för att hålla ledtråden koncis
-  let text = clean.slice(0, 2).join('\n\n');
-  return text.trim();
-}
+import {
+  cleanExtractParagraphs,
+  extractPersonMaskNames,
+  sanitizeWikipediaClue,
+} from '../src/engine/wikipedia.ts';
 
 export function sanitizeExtract(
   text: string,
   person: Person,
   lang: 'sv' | 'en' = 'sv'
 ): string {
-  if (!text) return '';
-  let out = text;
-
-  const isSv = lang === 'sv';
-
-  // 1. Ersätt hela inledande namn- och subjektsfrasen fram till verbet:
-  // "Stig Emil Fredrik Dagerman, född 5 oktober 1923..., var en svensk författare..."
-  // -> "Personen var en svensk författare..."
-  const verbRegex = isSv
-    ? /^[^.!?\n]+?\b(var|är|blev|har varit|räknas som)\b/i
-    : /^[^.!?\n]+?\b(was|is|became|has been|is considered)\b/i;
-
-  if (verbRegex.test(out)) {
-    out = out.replace(verbRegex, (_match, verb) => {
-      return isSv ? `Personen ${verb}` : `The person ${verb}`;
-    });
-  }
-
-  // 2. Ersätt eventuella ytterligare förekomster av personens namn i senare meningar
-  const names = [
-    person.name.sv,
-    person.name.en,
-    ...(person.name.sv?.split(/\s+/) || []),
-    ...(person.name.en?.split(/\s+/) || []),
-  ].filter((n): n is string => typeof n === 'string' && n.trim().length >= 3);
-
-  const sortedNames = [...new Set(names)].sort((a, b) => b.length - a.length);
-  for (const n of sortedNames) {
-    const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-    out = out.replace(regex, isSv ? 'personen' : 'the person');
-  }
-
-  // 3. Tvätta bort kvarvarande parenteser med födelse/dödsdatum
-  out = out.replace(/\([^)]*(?:född|död|born|died|\b\d{4}\b)[^)]*\)/gi, '');
-
-  // 4. Städa upp dubbel-mellanslag och interpunktion
-  out = out
-    .replace(/\s+/g, ' ')
-    .replace(/\s+([.,;:!?])/g, '$1')
-    .trim();
-
-  if (out.length > 0) {
-    out = out.charAt(0).toUpperCase() + out.slice(1);
-  }
-
-  return out;
+  const names = extractPersonMaskNames(person);
+  return sanitizeWikipediaClue(text, names, lang);
 }
 
 async function fetchWikiBatch(
@@ -227,11 +166,11 @@ async function main() {
         }
       }
 
-      if ((i + 1) % 10 === 0 || i === batches.length - 1) {
-        console.log(`    Batch ${i + 1}/${batches.length} klara (${Object.keys(cache).length} sparade i cache)`);
+      if ((i + 1) % 2 === 0 || i === batches.length - 1) {
+        console.log(`    [Sv Wiki ${i + 1}/${batches.length}] (${Object.keys(cache).length} sparade i cache)`);
         writeJson(cachePath, cache, false);
       }
-      await sleep(150);
+      await sleep(500);
     }
   }
 
@@ -253,11 +192,11 @@ async function main() {
         }
       }
 
-      if ((i + 1) % 10 === 0 || i === batches.length - 1) {
-        console.log(`    Engelsk batch ${i + 1}/${batches.length} klara`);
+      if ((i + 1) % 2 === 0 || i === batches.length - 1) {
+        console.log(`    [En Wiki ${i + 1}/${batches.length}] (${Object.keys(cache).length} sparade i cache)`);
         writeJson(cachePath, cache, false);
       }
-      await sleep(150);
+      await sleep(500);
     }
   }
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import L from 'leaflet';
-import type { Person } from '../types/person.ts';
+import { loc, QUIZ_CATEGORIES, type Person, type Tier } from '../types/person.ts';
 import {
   Compass,
   Sparkles,
@@ -11,7 +11,6 @@ import {
   AlertTriangle,
   ArrowRight,
   Search,
-  Flag,
   Briefcase,
   Award,
   BookOpen,
@@ -19,50 +18,72 @@ import {
   ChevronDown,
   ChevronUp,
   Minimize2,
-  Maximize2,
-  HelpCircle,
   X,
   Trophy,
   UserCheck,
   RotateCcw,
   Check,
-  Flame,
-  Medal,
   SlidersHorizontal,
 } from 'lucide-react';
 
 import { searchPeopleForgiving } from '../engine/fuzzySearch.ts';
+import { getSafePlaceName } from '../engine/clues.ts';
+import { compareGuess, haversineKm } from '../engine/guessFeedback.ts';
 import {
   getPersonWikipediaSummary,
   loadLocalWikipediaSummaries,
   type WikiSummaryData,
 } from '../engine/wikipedia.ts';
+import { ClueCard } from './geoguesser/ClueCard.tsx';
+import { loadGeoSession, saveGeoSession } from '../engine/sessionPersistence.ts';
+import type { SavedRoundRecord, SavedMatchRecord } from '../engine/profileStore.ts';
 
 interface GeoGuesserViewProps {
   allPeople: Person[];
   lang: 'sv' | 'en';
   initialPersonId?: string | null;
+  solvedPersonIds?: Set<string>;
+  onRoundComplete?: (round: Omit<SavedRoundRecord, 'id' | 'date'>) => void;
+  onMatchComplete?: (match: Omit<SavedMatchRecord, 'id' | 'date'>) => void;
   onInspectPerson?: (person: Person) => void;
   onBackToExplorer?: () => void;
 }
 
-type ClueType =
-  | 'gender'
+export type ClueType =
+  | 'profile'
   | 'occupation'
-  | 'citizenship'
   | 'works'
-  | 'description'
-  | 'portrait'
-  | 'wikiSummary';
+  | 'wikiSummary'
+  | 'portrait';
 
-const CLUE_COSTS: Record<ClueType, number> = {
-  gender: 50,
-  citizenship: 100,
+export const CLUE_COSTS: Record<ClueType, number> = {
+  profile: 75,
   occupation: 150,
-  wikiSummary: 250,
-  works: 250,
-  description: 100,
+  works: 200,
+  wikiSummary: 300,
   portrait: 350,
+};
+
+export const getBasePoints = (tier: Tier): number => {
+  if (tier === 'hard') return 1500;
+  if (tier === 'medium') return 1200;
+  return 1000;
+};
+
+/**
+ * Ledtrådar som ges gratis från start. Nu levande personer saknar dödsår och dödsort på kartan,
+ * vilket gör dem betydligt svårare (median ~31 förenliga kandidater mot ~1 för avlidna).
+ * Som kompensation får de Profil-ledtråden (kategori, kön, land) gratis.
+ */
+export const getFreeClues = (person: Person): ClueType[] => (person.deathDate ? [] : ['profile']);
+
+type TierFilter = 'easy' | 'medium' | 'hard' | 'all';
+export type LifeStatusFilter = 'historical' | 'living' | 'all';
+
+const matchesLifeStatus = (person: Person, status: LifeStatusFilter): boolean => {
+  if (status === 'historical') return !!person.deathDate;
+  if (status === 'living') return !person.deathDate;
+  return true;
 };
 
 const WRONG_GUESS_PENALTY = 100;
@@ -74,22 +95,6 @@ interface MatchRoundResult {
   isSolved: boolean;
   cluesUsed: ClueType[];
   wrongGuessesCount: number;
-}
-
-function haversineKm(coord1: [number, number], coord2: [number, number]): number {
-  const [lat1, lon1] = coord1;
-  const [lat2, lon2] = coord2;
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(R * c);
 }
 
 function getGeodesicPath(p1: [number, number], p2: [number, number], numPoints = 30): [number, number][] {
@@ -141,8 +146,10 @@ function getGeodesicPath(p1: [number, number], p2: [number, number], numPoints =
 }
 
 const CENTURIES = [
-  { label: 'Alla sekler', labelEn: 'All centuries', value: 'all' },
-  { label: 'Före 1400', labelEn: 'Before 1400', value: 'early' },
+  { label: 'Alla epoker', labelEn: 'All eras', value: 'all' },
+  { label: 'Antiken & forntid (< 500)', labelEn: 'Antiquity (< 500)', value: 'antiquity' },
+  { label: '500–1200-talet', labelEn: '500–1200s', value: 'early' },
+  { label: '1300-talet', labelEn: '1300s', value: '1300' },
   { label: '1400-talet', labelEn: '1400s', value: '1400' },
   { label: '1500-talet', labelEn: '1500s', value: '1500' },
   { label: '1600-talet', labelEn: '1600s', value: '1600' },
@@ -154,7 +161,8 @@ const CENTURIES = [
 
 function matchesCentury(year: number, century: string): boolean {
   if (century === 'all') return true;
-  if (century === 'early') return year < 1400;
+  if (century === 'antiquity') return year < 500;
+  if (century === 'early') return year >= 500 && year < 1300;
   const cNum = parseInt(century, 10);
   return year >= cNum && year < cNum + 100;
 }
@@ -163,44 +171,66 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
   allPeople,
   lang,
   initialPersonId,
+  solvedPersonIds,
+  onRoundComplete,
+  onMatchComplete,
   onInspectPerson,
 }) => {
   const isSv = lang === 'sv';
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
+  const ghostLayerGroupRef = useRef<L.LayerGroup | null>(null);
 
-  // Filter-tillstånd: Standard är 'guess' (Nivå 1: Mest kända personerna)
-  const [selectedTier, setSelectedTier] = useState<'guess' | 'reference' | 'all'>('guess');
-  const [selectedCentury, setSelectedCentury] = useState<string>('all');
-  const [onlySwedish, setOnlySwedish] = useState<boolean>(false);
-  const [requireBothCoords, setRequireBothCoords] = useState<boolean>(false);
+  const [initialSession] = useState(() => {
+    const s = loadGeoSession();
+    if (!s) return null;
+    if (initialPersonId && s.currentPersonId !== initialPersonId) return null;
+    const exists = allPeople.some((p) => p.id === s.currentPersonId);
+    return exists ? s : null;
+  });
+
+  // Filter-tillstånd: Standard är 'easy' (Lätt / Mest kända personerna) och 'historical' (Historiska / avlidna gestalter)
+  const [selectedTier, setSelectedTier] = useState<TierFilter>(() => (initialSession?.selectedTier as TierFilter) ?? 'easy');
+  const [selectedCentury, setSelectedCentury] = useState<string>(() => initialSession?.selectedCentury ?? 'all');
+  const [lifeStatus, setLifeStatus] = useState<LifeStatusFilter>(
+    () => (initialSession?.lifeStatus as LifeStatusFilter) ?? 'historical'
+  );
+  const [onlySwedish, setOnlySwedish] = useState<boolean>(() => initialSession?.onlySwedish ?? false);
+  const [requireBothCoords, setRequireBothCoords] = useState<boolean>(() => initialSession?.requireBothCoords ?? false);
 
   const eligiblePeople = useMemo(() => {
     return allPeople.filter((p) => {
-      // 1. Nivå: Mest kända (guess) vs Referens (reference) vs Alla
+      // 1. Nivå: Lätt / Medel / Svår / Alla
       if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
 
       // 2. Århundrade / Sekel
       if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
 
-      // 3. Svensk koppling
+      // 3. Livsstatus: Historiska (avlidna) / Nu levande / Alla
+      if (!matchesLifeStatus(p, lifeStatus)) return false;
+
+      // 4. Svensk koppling
       if (onlySwedish && !p.swedish) return false;
 
-      // 4. Måste ha minst en koordinat för att kunna visas på kartan
+      // 5. Måste ha minst en koordinat för att kunna visas på kartan
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
 
-      // 5. Kräver hel resa med både födelse- och dödsort om aktiverat
+      // 6. Kräver hel resa med både födelse- och dödsort om aktiverat
       if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
 
       return true;
     });
-  }, [allPeople, selectedTier, selectedCentury, onlySwedish, requireBothCoords]);
+  }, [allPeople, selectedTier, selectedCentury, lifeStatus, onlySwedish, requireBothCoords]);
 
   // Current person
   const [currentPerson, setCurrentPerson] = useState<Person>(() => {
     if (initialPersonId) {
       const found = allPeople.find((p) => p.id === initialPersonId);
+      if (found) return found;
+    }
+    if (initialSession) {
+      const found = allPeople.find((p) => p.id === initialSession.currentPersonId);
       if (found) return found;
     }
     const preferred =
@@ -210,35 +240,144 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     return preferred;
   });
 
-  // Game state
-  const [revealedClues, setRevealedClues] = useState<Set<ClueType>>(new Set());
-  const [isSolved, setIsSolved] = useState(false);
-  const [isSurrendered, setIsSurrendered] = useState(false);
-  const [earnedRoundScore, setEarnedRoundScore] = useState<number | null>(null);
-  const [deductionsAtEnd, setDeductionsAtEnd] = useState<{ cluesCost: number; wrongCost: number } | null>(null);
+  // Game state: purchasedClues tracks permanent point deductions; expandedClues tracks UI toggle state
+  const [purchasedClues, setPurchasedClues] = useState<Set<ClueType>>(() => {
+    if (initialSession?.purchasedClues) {
+      return new Set(initialSession.purchasedClues as ClueType[]);
+    }
+    return new Set();
+  });
+  const [expandedClues, setExpandedClues] = useState<Set<ClueType>>(() => {
+    if (initialSession?.expandedClues) {
+      return new Set(initialSession.expandedClues as ClueType[]);
+    }
+    return new Set(getFreeClues(currentPerson));
+  });
+  const [isSolved, setIsSolved] = useState(() => initialSession?.isSolved ?? false);
+  const [isSurrendered, setIsSurrendered] = useState(() => initialSession?.isSurrendered ?? false);
+  const [earnedRoundScore, setEarnedRoundScore] = useState<number | null>(() => initialSession?.earnedRoundScore ?? null);
+  const [deductionsAtEnd, setDeductionsAtEnd] = useState<{ cluesCost: number; wrongCost: number } | null>(() => initialSession?.deductionsAtEnd ?? null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [wrongGuesses, setWrongGuesses] = useState<string[]>([]);
+  const [wrongGuesses, setWrongGuesses] = useState<Person[]>(() => {
+    if (initialSession?.wrongGuessIds) {
+      const byId = new Map(allPeople.map((p) => [p.id, p]));
+      return initialSession.wrongGuessIds.map((id) => byId.get(id)).filter((p): p is Person => !!p);
+    }
+    return [];
+  });
+  const [showGhostPins, setShowGhostPins] = useState<boolean>(() => initialSession?.showGhostPins ?? true);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [wikiData, setWikiData] = useState<WikiSummaryData | null>(null);
   const [wikiLoading, setWikiLoading] = useState<boolean>(false);
 
   // Match state (5 ronders spelomgång)
-  const [isMatchActive, setIsMatchActive] = useState<boolean>(false);
+  const [isMatchActive, setIsMatchActive] = useState<boolean>(() => initialSession?.isMatchActive ?? false);
   const [showMatchModal, setShowMatchModal] = useState<boolean>(false);
-  const [matchRounds, setMatchRounds] = useState<Person[]>([]);
-  const [currentRoundIndex, setCurrentRoundIndex] = useState<number>(0);
-  const [matchResults, setMatchResults] = useState<MatchRoundResult[]>([]);
-  const [isMatchSummaryOpen, setIsMatchSummaryOpen] = useState<boolean>(false);
+  const [matchRounds, setMatchRounds] = useState<Person[]>(() => {
+    if (initialSession?.matchRoundIds && initialSession.isMatchActive) {
+      const byId = new Map(allPeople.map((p) => [p.id, p]));
+      return initialSession.matchRoundIds.map((id) => byId.get(id)).filter((p): p is Person => !!p);
+    }
+    return [];
+  });
+  const [currentRoundIndex, setCurrentRoundIndex] = useState<number>(() => initialSession?.currentRoundIndex ?? 0);
+  const [matchResults, setMatchResults] = useState<MatchRoundResult[]>(() => {
+    if (initialSession?.matchResults && initialSession.isMatchActive) {
+      const byId = new Map(allPeople.map((p) => [p.id, p]));
+      return initialSession.matchResults
+        .map((r) => {
+          const person = byId.get(r.personId);
+          if (!person) return null;
+          return {
+            person,
+            score: r.score,
+            isSolved: r.isSolved,
+            cluesUsed: r.cluesUsed as ClueType[],
+            wrongGuessesCount: r.wrongGuessesCount,
+          };
+        })
+        .filter((r): r is MatchRoundResult => !!r);
+    }
+    return [];
+  });
+  const [isMatchSummaryOpen, setIsMatchSummaryOpen] = useState<boolean>(() => initialSession?.isMatchSummaryOpen ?? false);
 
   // Match setup form-tillstånd
-  const [matchCentury, setMatchCentury] = useState<string>('all');
-  const [matchTier, setMatchTier] = useState<'guess' | 'reference' | 'all'>('guess');
-  const [matchOnlySwedish, setMatchOnlySwedish] = useState<boolean>(false);
+  const [matchCentury, setMatchCentury] = useState<string>(() => initialSession?.matchCentury ?? 'all');
+  const [matchTier, setMatchTier] = useState<TierFilter>(() => (initialSession?.matchTier as TierFilter) ?? 'easy');
+  const [matchLifeStatus, setMatchLifeStatus] = useState<LifeStatusFilter>(
+    () => (initialSession?.matchLifeStatus as LifeStatusFilter) ?? 'historical'
+  );
+  const [matchOnlySwedish, setMatchOnlySwedish] = useState<boolean>(() => initialSession?.matchOnlySwedish ?? false);
+
+  // Spara spelsession i localStorage så inte framsteg försvinner vid skärmsläckning eller flikomladdning
+  useEffect(() => {
+    saveGeoSession({
+      selectedTier,
+      selectedCentury,
+      lifeStatus,
+      onlySwedish,
+      requireBothCoords,
+      showGhostPins,
+      currentPersonId: currentPerson.id,
+      purchasedClues: Array.from(purchasedClues),
+      expandedClues: Array.from(expandedClues),
+      isSolved,
+      isSurrendered,
+      earnedRoundScore,
+      deductionsAtEnd,
+      wrongGuessIds: wrongGuesses.map((p) => p.id),
+      isMatchActive,
+      matchRoundIds: matchRounds.map((p) => p.id),
+      currentRoundIndex,
+      matchResults: matchResults.map((r) => ({
+        personId: r.person.id,
+        score: r.score,
+        isSolved: r.isSolved,
+        cluesUsed: r.cluesUsed,
+        wrongGuessesCount: r.wrongGuessesCount,
+      })),
+      isMatchSummaryOpen,
+      matchCentury,
+      matchTier,
+      matchLifeStatus,
+      matchOnlySwedish,
+    });
+  }, [
+    selectedTier,
+    selectedCentury,
+    lifeStatus,
+    onlySwedish,
+    requireBothCoords,
+    showGhostPins,
+    currentPerson.id,
+    purchasedClues,
+    expandedClues,
+    isSolved,
+    isSurrendered,
+    earnedRoundScore,
+    deductionsAtEnd,
+    wrongGuesses,
+    isMatchActive,
+    matchRounds,
+    currentRoundIndex,
+    matchResults,
+    isMatchSummaryOpen,
+    matchCentury,
+    matchTier,
+    matchLifeStatus,
+    matchOnlySwedish,
+  ]);
 
   // Ladda in lokala Wikipedia-sammanfattningar i bakgrunden så de finns i minnet direkt
   useEffect(() => {
     loadLocalWikipediaSummaries();
   }, []);
+
+  // Nollställ Wikipedia-data vid språkbyte så rätt språk hämtas om ledtråden är öppen
+  useEffect(() => {
+    setWikiData(null);
+  }, [lang]);
 
   // UI state: whether the floating overlay sidebar is expanded or minimized
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -286,7 +425,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Initialize Map
+  // Initialize Map (endast vid mount så språkbyte inte förstör och återskapar kartan)
   useEffect(() => {
     if (!mapContainerRef.current) return;
     if (mapRef.current) return;
@@ -324,15 +463,17 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     L.control
       .layers(
         {
-          [isSv ? '🗺️ Historisk Atlas (Esri)' : '🗺️ Historic Atlas (Esri)']: topoLayer,
-          [isSv ? '🌐 Standardkarta (OSM)' : '🌐 Standard (OSM)']: osmLayer,
+          '🗺️ Atlas (Esri)': topoLayer,
+          '🌐 Standard (OSM)': osmLayer,
         },
         undefined,
         { position: 'bottomright' }
       )
       .addTo(map);
 
+    const ghostLayerGroup = L.layerGroup().addTo(map);
     const layerGroup = L.layerGroup().addTo(map);
+    ghostLayerGroupRef.current = ghostLayerGroup;
     layerGroupRef.current = layerGroup;
     mapRef.current = map;
 
@@ -347,7 +488,17 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
       map.remove();
       mapRef.current = null;
     };
-  }, [isSv]);
+  }, []);
+
+  const lastFittedKeyRef = useRef<string>('');
+
+  // Säkerställ att Leaflet uppdaterar sin canvas-storlek när mobillayoutens dockade balkar ändrar höjd
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      mapRef.current?.invalidateSize();
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [isMobile, wrongGuesses.length, isSolved, isSurrendered]);
 
   // Update markers and polyline when currentPerson changes
   useEffect(() => {
@@ -359,21 +510,31 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
     const birthCoord = currentPerson.birthPlace?.coord;
     const deathCoord = currentPerson.deathPlace?.coord;
+    const isRevealed = isSolved || isSurrendered;
 
-    const birthPlaceName =
-      currentPerson.birthPlace?.name[lang] ||
-      currentPerson.birthPlace?.name.sv ||
-      currentPerson.birthPlace?.name.en ||
-      (isSv ? 'Födelseort' : 'Birthplace');
-
-    const deathPlaceName =
-      currentPerson.deathPlace?.name[lang] ||
-      currentPerson.deathPlace?.name.sv ||
-      currentPerson.deathPlace?.name.en ||
-      (isSv ? 'Dödsort' : 'Deathplace');
+    const birthPlaceName = getSafePlaceName(
+      currentPerson.birthPlace,
+      currentPerson,
+      lang,
+      isRevealed,
+      isSv ? 'Födelseort' : 'Birthplace'
+    );
+    const deathPlaceName = getSafePlaceName(
+      currentPerson.deathPlace,
+      currentPerson,
+      lang,
+      isRevealed,
+      isSv ? 'Dödsort' : 'Deathplace'
+    );
 
     const birthYear = currentPerson.birthDate.year;
     const deathYear = currentPerson.deathDate?.year;
+
+    const fitKey = `${currentPerson.id}:${isMobile ? 'm' : 'd'}`;
+    const shouldMoveCamera = lastFittedKeyRef.current !== fitKey;
+    if (shouldMoveCamera) {
+      lastFittedKeyRef.current = fitKey;
+    }
 
     if (birthCoord && deathCoord) {
       const dist = haversineKm(birthCoord, deathCoord);
@@ -397,7 +558,9 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
           iconAnchor: [0, 0],
         });
         L.marker(birthCoord, { icon }).addTo(layers);
-        map.setView(birthCoord, isMobile ? 4.5 : 5.0, { animate: true });
+        if (shouldMoveCamera) {
+          map.setView(birthCoord, isMobile ? 4.5 : 5.0, { animate: true });
+        }
       } else {
         const birthHtml = `
           <div class="geo-marker-container geo-marker-birth">
@@ -445,14 +608,16 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
           opacity: 0.85,
         }).addTo(layers);
 
-        // God marginal runt orterna så standardvyn är lagom utzoomad och visar omkringliggande länder/hav
-        const bounds = L.latLngBounds([birthCoord, deathCoord]).pad(isMobile ? 0.95 : 0.8);
-        map.fitBounds(bounds, {
-          paddingTopLeft: isMobile ? [100, 25] : [70, 70],
-          paddingBottomRight: isMobile ? [25, 140] : [390, 70],
-          maxZoom: isMobile ? 4.6 : 5.2,
-          animate: true,
-        });
+        if (shouldMoveCamera) {
+          // På mobil har kartan en egen fri yta mellan topp- och bottenbalken utan överlappande paneler!
+          const bounds = L.latLngBounds([birthCoord, deathCoord]).pad(isMobile ? 0.65 : 0.8);
+          map.fitBounds(bounds, {
+            paddingTopLeft: isMobile ? [32, 32] : [70, 70],
+            paddingBottomRight: isMobile ? [32, 32] : [390, 70],
+            maxZoom: isMobile ? 4.8 : 5.2,
+            animate: true,
+          });
+        }
       }
     } else if (birthCoord) {
       const birthHtml = `
@@ -473,7 +638,9 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
         iconAnchor: [0, 0],
       });
       L.marker(birthCoord, { icon: birthIcon }).addTo(layers);
-      map.setView(birthCoord, isMobile ? 4.2 : 4.8, { animate: true });
+      if (shouldMoveCamera) {
+        map.setView(birthCoord, isMobile ? 4.3 : 4.8, { animate: true });
+      }
     } else if (deathCoord) {
       const deathHtml = `
         <div class="geo-marker-container geo-marker-death">
@@ -493,11 +660,150 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
         iconAnchor: [0, 0],
       });
       L.marker(deathCoord, { icon: deathIcon }).addTo(layers);
-      map.setView(deathCoord, isMobile ? 4.2 : 4.8, { animate: true });
-    } else {
+      if (shouldMoveCamera) {
+        map.setView(deathCoord, isMobile ? 4.3 : 4.8, { animate: true });
+      }
+    } else if (shouldMoveCamera) {
       map.setView([35, 15], 3, { animate: true });
     }
-  }, [currentPerson, lang, isSv, isMobile]);
+  }, [currentPerson, lang, isSv, isMobile, isSolved, isSurrendered]);
+
+  // Rita Spökmarkörer (Ghost Pins) för felgissade personer utan att störa kamerans fokus
+  useEffect(() => {
+    const ghostLayers = ghostLayerGroupRef.current;
+    if (!ghostLayers) return;
+
+    ghostLayers.clearLayers();
+    if (!showGhostPins || wrongGuesses.length === 0) return;
+
+    for (const gp of wrongGuesses) {
+      const gName = loc(gp.name, lang, isSv ? 'Gissning' : 'Guess');
+      const gBirthCoord = gp.birthPlace?.coord;
+      const gDeathCoord = gp.deathPlace?.coord;
+      const gBirthPlace = loc(gp.birthPlace?.name, lang, '');
+      const gDeathPlace = loc(gp.deathPlace?.name, lang, '');
+      const gBirthYear = gp.birthDate.year;
+      const gDeathYear = gp.deathDate?.year;
+
+      if (gBirthCoord && gDeathCoord) {
+        const dist = haversineKm(gBirthCoord, gDeathCoord);
+        if (dist < 10) {
+          const html = `
+            <div class="geo-marker-container geo-marker-ghost">
+              <div class="geo-marker-pill">
+                <span class="pin-icon">👻</span>
+                <span class="pin-place">${gName}${gBirthPlace ? ` · ${gBirthPlace}` : ''}</span>
+                <span class="pin-year">${gBirthYear}–${gDeathYear ?? (isSv ? 'nu' : 'now')}</span>
+              </div>
+              <div class="geo-marker-tip"></div>
+              <div class="geo-marker-dot"></div>
+            </div>
+          `;
+          L.marker(gBirthCoord, {
+            icon: L.divIcon({ html, className: 'custom-geo-marker', iconSize: [0, 0], iconAnchor: [0, 0] }),
+          }).addTo(ghostLayers);
+        } else {
+          const birthHtml = `
+            <div class="geo-marker-container geo-marker-ghost">
+              <div class="geo-marker-pill">
+                <span class="pin-icon">👻</span>
+                <span class="pin-place">${gName}${gBirthPlace ? ` (${gBirthPlace})` : ''}</span>
+                <span class="pin-year">🐣 ${gBirthYear}</span>
+              </div>
+              <div class="geo-marker-tip"></div>
+              <div class="geo-marker-dot"></div>
+            </div>
+          `;
+          L.marker(gBirthCoord, {
+            icon: L.divIcon({ html: birthHtml, className: 'custom-geo-marker', iconSize: [0, 0], iconAnchor: [0, 0] }),
+          }).addTo(ghostLayers);
+
+          const deathHtml = `
+            <div class="geo-marker-container geo-marker-ghost">
+              <div class="geo-marker-pill">
+                <span class="pin-icon">👻</span>
+                <span class="pin-place">${gName}${gDeathPlace ? ` (${gDeathPlace})` : ''}</span>
+                <span class="pin-year">🪦 ${gDeathYear ?? (isSv ? 'nu' : 'now')}</span>
+              </div>
+              <div class="geo-marker-tip"></div>
+              <div class="geo-marker-dot"></div>
+            </div>
+          `;
+          L.marker(gDeathCoord, {
+            icon: L.divIcon({ html: deathHtml, className: 'custom-geo-marker', iconSize: [0, 0], iconAnchor: [0, 0] }),
+          }).addTo(ghostLayers);
+
+          const curve = getGeodesicPath(gBirthCoord, gDeathCoord);
+          L.polyline(curve, {
+            color: '#64748b',
+            weight: 2,
+            dashArray: '4, 6',
+            opacity: 0.65,
+          }).addTo(ghostLayers);
+        }
+      } else if (gBirthCoord) {
+        const birthHtml = `
+          <div class="geo-marker-container geo-marker-ghost">
+            <div class="geo-marker-pill">
+              <span class="pin-icon">👻</span>
+              <span class="pin-place">${gName}${gBirthPlace ? ` · ${gBirthPlace}` : ''}</span>
+              <span class="pin-year">${gBirthYear}–${gDeathYear ?? (isSv ? 'nu' : 'now')}</span>
+            </div>
+            <div class="geo-marker-tip"></div>
+            <div class="geo-marker-dot"></div>
+          </div>
+        `;
+        L.marker(gBirthCoord, {
+          icon: L.divIcon({ html: birthHtml, className: 'custom-geo-marker', iconSize: [0, 0], iconAnchor: [0, 0] }),
+        }).addTo(ghostLayers);
+      } else if (gDeathCoord) {
+        const deathHtml = `
+          <div class="geo-marker-container geo-marker-ghost">
+            <div class="geo-marker-pill">
+              <span class="pin-icon">👻</span>
+              <span class="pin-place">${gName}${gDeathPlace ? ` · ${gDeathPlace}` : ''}</span>
+              <span class="pin-year">${gBirthYear}–${gDeathYear ?? (isSv ? 'nu' : 'now')}</span>
+            </div>
+            <div class="geo-marker-tip"></div>
+            <div class="geo-marker-dot"></div>
+          </div>
+        `;
+        L.marker(gDeathCoord, {
+          icon: L.divIcon({ html: deathHtml, className: 'custom-geo-marker', iconSize: [0, 0], iconAnchor: [0, 0] }),
+        }).addTo(ghostLayers);
+      }
+    }
+  }, [wrongGuesses, showGhostPins, lang, isSv]);
+
+  const focusPersonOnMap = (person: Person) => {
+    const map = mapRef.current;
+    if (!map) return;
+    setShowGhostPins(true);
+    if (isMobile) {
+      setIsMobileSheetExpanded(false);
+    }
+    const b = person.birthPlace?.coord;
+    const d = person.deathPlace?.coord;
+    if (b && d && haversineKm(b, d) >= 10) {
+      const bounds = L.latLngBounds([b, d]).pad(isMobile ? 0.65 : 0.8);
+      map.fitBounds(bounds, {
+        paddingTopLeft: isMobile ? [32, 32] : [70, 70],
+        paddingBottomRight: isMobile ? [32, 32] : [390, 70],
+        maxZoom: 5.2,
+        animate: true,
+      });
+    } else if (b) {
+      map.setView(b, 5.0, { animate: true });
+    } else if (d) {
+      map.setView(d, 5.0, { animate: true });
+    }
+  };
+
+  const pickRandomPreferUnsolved = (pool: Person[]): Person => {
+    const unsolved = solvedPersonIds ? pool.filter((p) => !solvedPersonIds.has(p.id)) : pool;
+    const source = unsolved.length > 0 ? unsolved : pool;
+    return source[Math.floor(Math.random() * source.length)] || allPeople[0]!;
+  };
 
   const handleNextPerson = (specified?: Person) => {
     let next: Person;
@@ -505,10 +811,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
       next = specified;
     } else {
       const candidates = eligiblePeople.filter((p) => p.id !== currentPerson.id);
-      next = candidates[Math.floor(Math.random() * candidates.length)] || allPeople[0]!;
+      next = pickRandomPreferUnsolved(candidates);
     }
     setCurrentPerson(next);
-    setRevealedClues(new Set());
+    setPurchasedClues(new Set());
+    setExpandedClues(new Set(getFreeClues(next)));
     setIsSolved(false);
     setIsSurrendered(false);
     setEarnedRoundScore(null);
@@ -522,11 +829,25 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     setIsMobileSheetExpanded(false);
   };
 
-  const handleTierChange = (tier: 'guess' | 'reference' | 'all') => {
+  // Om användaren väljer "Spela som gåta i GeoGuesser" från PersonModal när GeoGuesser redan varit monterad
+  useEffect(() => {
+    if (!initialPersonId) return;
+    const found = allPeople.find((p) => p.id === initialPersonId);
+    if (found && found.id !== currentPerson.id) {
+      if (isMatchActive) {
+        cancelMatch();
+      }
+      handleNextPerson(found);
+    }
+  }, [initialPersonId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTierChange = (tier: TierFilter) => {
+    if (isMatchActive) return;
     setSelectedTier(tier);
     const candidates = allPeople.filter((p) => {
       if (tier !== 'all' && p.tier !== tier) return false;
       if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
+      if (!matchesLifeStatus(p, lifeStatus)) return false;
       if (onlySwedish && !p.swedish) return false;
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
       if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
@@ -538,10 +859,12 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
   };
 
   const handleCenturyChange = (century: string) => {
+    if (isMatchActive) return;
     setSelectedCentury(century);
     const candidates = allPeople.filter((p) => {
       if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
       if (!matchesCentury(p.birthDate.year, century)) return false;
+      if (!matchesLifeStatus(p, lifeStatus)) return false;
       if (onlySwedish && !p.swedish) return false;
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
       if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
@@ -552,15 +875,43 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     }
   };
 
+  const handleLifeStatusChange = (status: LifeStatusFilter) => {
+    if (isMatchActive) return;
+    setLifeStatus(status);
+    // Om man väljer "Nu levande" och sekel-filtret är satt på före 1900-talet, nollställ sekel-filtret så det finns kandidater
+    const nextCentury =
+      status === 'living' && selectedCentury !== 'all' && selectedCentury !== '20' && selectedCentury !== '21'
+        ? 'all'
+        : selectedCentury;
+    if (nextCentury !== selectedCentury) {
+      setSelectedCentury(nextCentury);
+    }
+    const candidates = allPeople.filter((p) => {
+      if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
+      if (!matchesCentury(p.birthDate.year, nextCentury)) return false;
+      if (!matchesLifeStatus(p, status)) return false;
+      if (onlySwedish && !p.swedish) return false;
+      if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
+      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
+      return true;
+    });
+    if (candidates.length > 0 && !matchesLifeStatus(currentPerson, status)) {
+      handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
+    }
+  };
+
   const handleSwedishToggle = () => {
+    if (isMatchActive) return;
     const nextVal = !onlySwedish;
     setOnlySwedish(nextVal);
     if (nextVal && !currentPerson.swedish) {
       const candidates = allPeople.filter((p) => {
         if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
         if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
+        if (!matchesLifeStatus(p, lifeStatus)) return false;
         if (!p.swedish) return false;
         if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
+        if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
         return true;
       });
       if (candidates.length > 0) {
@@ -569,8 +920,107 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     }
   };
 
+  // Data helpers (behövs för att avgöra vilka ledtrådar som finns tillgängliga för aktuell person)
+  const name = loc(currentPerson.name, lang, isSv ? 'Okänd' : 'Unknown');
+  const desc = loc(currentPerson.description, lang);
+  const birthPlace = currentPerson.birthPlace;
+  const deathPlace = currentPerson.deathPlace;
+  const isRevealed = isSolved || isSurrendered;
+  const safeBirthPlaceLabel = getSafePlaceName(birthPlace, currentPerson, lang, isRevealed, isSv ? 'Okänd ort' : 'Unknown');
+  const safeDeathPlaceLabel = getSafePlaceName(deathPlace, currentPerson, lang, isRevealed, isSv ? 'Okänd ort' : 'Unknown');
+  const birthCoord = birthPlace?.coord;
+  const deathCoord = deathPlace?.coord;
+  const birthYear = currentPerson.birthDate.year;
+  const deathYear = currentPerson.deathDate?.year;
+  const isLiving = !deathYear;
+  const lifespan = deathYear ? deathYear - birthYear : new Date().getFullYear() - birthYear;
+  const distanceKm = birthCoord && deathCoord ? haversineKm(birthCoord, deathCoord) : null;
+
+  const occupations = currentPerson.occupations
+    .map((o) => loc(o.name, lang))
+    .filter(Boolean);
+  const citizenship = currentPerson.citizenship
+    .map((c) => loc(c.name, lang))
+    .filter(Boolean);
+  const works = currentPerson.notableWorks
+    .map((w) => loc(w.name, lang))
+    .filter(Boolean);
+
+  // Jämförelsekort för alla felaktiga gissningar under pågående rond
+  const guessFeedbacks = useMemo(
+    () => wrongGuesses.map((gp) => compareGuess(gp, currentPerson, lang)),
+    [wrongGuesses, currentPerson, lang]
+  );
+
+  // Härledda ledtråds-badges från nära gissningar
+  const deducedProfileHint = useMemo(() => {
+    const parts: string[] = [];
+    const seen = new Set<string>();
+    for (const fb of guessFeedbacks) {
+      for (const cat of fb.sharedCategories) {
+        const info = QUIZ_CATEGORIES[cat];
+        if (info && !seen.has(cat)) {
+          seen.add(cat);
+          parts.push(`${info.icon} ${info[lang] || info.sv}`);
+        }
+      }
+      if (fb.matchedGenderLabel && !seen.has('gender')) {
+        seen.add('gender');
+        parts.push(fb.matchedGenderLabel);
+      }
+      for (const cit of fb.sharedCitizenships) {
+        if (!seen.has(cit)) {
+          seen.add(cit);
+          parts.push(cit);
+        }
+      }
+    }
+    return parts.length > 0 ? parts.slice(0, 3).join(' · ') : null;
+  }, [guessFeedbacks, lang]);
+
+  const deducedOccupationHint = useMemo(() => {
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const fb of guessFeedbacks) {
+      for (const occ of fb.sharedOccupations) {
+        if (!seen.has(occ)) {
+          seen.add(occ);
+          list.push(occ.charAt(0).toUpperCase() + occ.slice(1));
+        }
+      }
+    }
+    return list.length > 0 ? list.slice(0, 2).join(', ') : null;
+  }, [guessFeedbacks]);
+
+  // Vilka ledtrådar som faktiskt har data för aktuell person (5-stegsstege)
+  const availableClues = useMemo<ClueType[]>(() => {
+    const list: ClueType[] = ['profile'];
+    if (occupations.length > 0 || desc) list.push('occupation');
+    if (works.length > 0) list.push('works');
+    list.push('wikiSummary');
+    if (currentPerson.image?.thumb) list.push('portrait');
+    return list;
+  }, [occupations.length, desc, works.length, currentPerson.image?.thumb]);
+
+  const freeClues = useMemo(() => new Set(getFreeClues(currentPerson)), [currentPerson]);
+
   const toggleClue = (type: ClueType) => {
-    setRevealedClues((prev) => {
+    if (!isSolved && !isSurrendered && !purchasedClues.has(type) && !freeClues.has(type)) {
+      setPurchasedClues((prev) => {
+        const next = new Set(prev);
+        next.add(type);
+        return next;
+      });
+      setExpandedClues((prev) => {
+        const next = new Set(prev);
+        next.add(type);
+        return next;
+      });
+      return;
+    }
+
+    // Om ledtråden redan är köpt eller om gåtan är över: växla bara expanderat läge (ingen poängåterbetalning!)
+    setExpandedClues((prev) => {
       const next = new Set(prev);
       if (next.has(type)) {
         next.delete(type);
@@ -582,13 +1032,13 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
   };
 
   const currentPotentialScore = useMemo(() => {
-    let base = currentPerson.tier === 'reference' ? 1200 : 1000;
-    for (const clue of revealedClues) {
+    let base = getBasePoints(currentPerson.tier);
+    for (const clue of purchasedClues) {
       base -= CLUE_COSTS[clue] ?? 100;
     }
     base -= wrongGuesses.length * WRONG_GUESS_PENALTY;
     return Math.max(MIN_ROUND_SCORE, base);
-  }, [currentPerson, revealedClues, wrongGuesses]);
+  }, [currentPerson, purchasedClues, wrongGuesses]);
 
   const score = earnedRoundScore ?? (isSolved ? currentPotentialScore : 0);
 
@@ -597,46 +1047,121 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     setSearchQuery('');
 
     if (person.id === currentPerson.id) {
-      const cluesCost = Array.from(revealedClues).reduce((sum, c) => sum + (CLUE_COSTS[c] ?? 0), 0);
+      const cluesCost = Array.from(purchasedClues).reduce((sum, c) => sum + (CLUE_COSTS[c] ?? 0), 0);
       const wrongCost = wrongGuesses.length * WRONG_GUESS_PENALTY;
-      const base = currentPerson.tier === 'reference' ? 1200 : 1000;
+      const base = getBasePoints(currentPerson.tier);
       const finalScore = Math.max(MIN_ROUND_SCORE, base - cluesCost - wrongCost);
 
       setEarnedRoundScore(finalScore);
       setDeductionsAtEnd({ cluesCost, wrongCost });
       setIsSolved(true);
 
+      onRoundComplete?.({
+        personId: currentPerson.id,
+        personName: loc(currentPerson.name, lang, 'Okänd'),
+        tier: currentPerson.tier,
+        score: finalScore,
+        isSolved: true,
+        cluesUsedCount: purchasedClues.size,
+        wrongGuessesCount: wrongGuesses.length,
+      });
+
       if (isMatchActive) {
-        setMatchResults((prev) => [
-          ...prev,
-          {
-            person: currentPerson,
-            score: finalScore,
-            isSolved: true,
-            cluesUsed: Array.from(revealedClues),
-            wrongGuessesCount: wrongGuesses.length,
-          },
-        ]);
+        const newResult: MatchRoundResult = {
+          person: currentPerson,
+          score: finalScore,
+          isSolved: true,
+          cluesUsed: Array.from(purchasedClues),
+          wrongGuessesCount: wrongGuesses.length,
+        };
+        const updatedResults = [...matchResults, newResult];
+        setMatchResults(updatedResults);
+
+        if (currentRoundIndex === 4) {
+          onMatchComplete?.({
+            totalScore: updatedResults.reduce((acc, r) => acc + r.score, 0),
+            solvedCount: updatedResults.filter((r) => r.isSolved).length,
+            tierFilter: selectedTier,
+            centuryFilter: selectedCentury,
+            swedishOnly: onlySwedish,
+            rounds: updatedResults.map((r) => ({
+              personId: r.person.id,
+              personName: loc(r.person.name, lang, 'Okänd'),
+              score: r.score,
+              isSolved: r.isSolved,
+            })),
+          });
+        }
       }
 
-      // Avslöja alla ledtrådar för fri läsning efter rätt svar utan att påverka poängen
-      setRevealedClues(new Set(['gender', 'occupation', 'citizenship', 'works', 'description', 'portrait', 'wikiSummary']));
+      // Avslöja alla tillgängliga ledtrådar för fri läsning efter rätt svar utan att påverka poängen
+      setExpandedClues(new Set(availableClues));
       setIsSidebarOpen(true);
       setIsMobileSheetExpanded(true);
     } else {
-      const guessedName = person.name[lang] || person.name.sv || person.name.en || 'Okänd';
-      if (!wrongGuesses.includes(guessedName)) {
-        setWrongGuesses((prev) => [...prev, guessedName]);
+      if (!wrongGuesses.some((wg) => wg.id === person.id)) {
+        setWrongGuesses((prev) => [person, ...prev]);
       }
     }
   };
 
-  const startMatch = (century: string, tier: 'guess' | 'reference' | 'all', swedishOnly: boolean) => {
+  const handleSurrender = () => {
+    const cluesCost = Array.from(purchasedClues).reduce((sum, c) => sum + (CLUE_COSTS[c] ?? 0), 0);
+    const wrongCost = wrongGuesses.length * WRONG_GUESS_PENALTY;
+    setIsSurrendered(true);
+    setEarnedRoundScore(0);
+    setDeductionsAtEnd({ cluesCost, wrongCost });
+
+    onRoundComplete?.({
+      personId: currentPerson.id,
+      personName: loc(currentPerson.name, lang, 'Okänd'),
+      tier: currentPerson.tier,
+      score: 0,
+      isSolved: false,
+      cluesUsedCount: purchasedClues.size,
+      wrongGuessesCount: wrongGuesses.length,
+    });
+
+    if (isMatchActive) {
+      const newResult: MatchRoundResult = {
+        person: currentPerson,
+        score: 0,
+        isSolved: false,
+        cluesUsed: Array.from(purchasedClues),
+        wrongGuessesCount: wrongGuesses.length,
+      };
+      const updatedResults = [...matchResults, newResult];
+      setMatchResults(updatedResults);
+
+      if (currentRoundIndex === 4) {
+        onMatchComplete?.({
+          totalScore: updatedResults.reduce((acc, r) => acc + r.score, 0),
+          solvedCount: updatedResults.filter((r) => r.isSolved).length,
+          tierFilter: selectedTier,
+          centuryFilter: selectedCentury,
+          swedishOnly: onlySwedish,
+          rounds: updatedResults.map((r) => ({
+            personId: r.person.id,
+            personName: loc(r.person.name, lang, 'Okänd'),
+            score: r.score,
+            isSolved: r.isSolved,
+          })),
+        });
+      }
+    }
+    setExpandedClues(new Set(availableClues));
+    setIsSidebarOpen(true);
+    setIsMobileSheetExpanded(true);
+  };
+
+  const startMatch = (century: string, tier: TierFilter, status: LifeStatusFilter, swedishOnly: boolean) => {
     const candidates = allPeople.filter((p) => {
       if (tier !== 'all' && p.tier !== tier) return false;
       if (!matchesCentury(p.birthDate.year, century)) return false;
+      if (!matchesLifeStatus(p, status)) return false;
       if (swedishOnly && !p.swedish) return false;
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
+      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
       return true;
     });
 
@@ -645,11 +1170,14 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
       return;
     }
 
-    const shuffled = [...candidates].sort(() => 0.5 - Math.random());
+    const unsolved = solvedPersonIds ? candidates.filter((p) => !solvedPersonIds.has(p.id)) : candidates;
+    const pool = unsolved.length >= 5 ? unsolved : candidates;
+    const shuffled = [...pool].sort(() => 0.5 - Math.random());
     const five = shuffled.slice(0, 5);
 
     setSelectedCentury(century);
     setSelectedTier(tier);
+    setLifeStatus(status);
     setOnlySwedish(swedishOnly);
 
     setMatchRounds(five);
@@ -687,7 +1215,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
   // Hämta Wikipedia-ingress (lokalt i minnet eller fallback från API) när ledtråden öppnas eller när gåtan är avslutad
   useEffect(() => {
-    if (!revealedClues.has('wikiSummary') && !isSolved && !isSurrendered) return;
+    if (!purchasedClues.has('wikiSummary') && !expandedClues.has('wikiSummary') && !isSolved && !isSurrendered) return;
     if (wikiData || wikiLoading) return;
 
     setWikiLoading(true);
@@ -698,351 +1226,628 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
       .finally(() => {
         setWikiLoading(false);
       });
-  }, [revealedClues, isSolved, isSurrendered, currentPerson, lang, wikiData, wikiLoading]);
+  }, [purchasedClues, expandedClues, isSolved, isSurrendered, currentPerson, lang, wikiData, wikiLoading]);
 
   const sanitizedWikiSummary = wikiData?.sanitized || '';
   const wikiSummary = wikiData?.raw || null;
   const wikiTitle = wikiData?.title || currentPerson.wiki[lang] || currentPerson.wiki.sv || currentPerson.wiki.en;
-  const wikiDomain = wikiData?.lang || (currentPerson.wiki[lang] || currentPerson.wiki.sv ? 'sv' : 'en');
+  const wikiDomain = wikiData?.lang || (currentPerson.wiki[lang] ? lang : (currentPerson.wiki.sv ? 'sv' : 'en'));
   const wikiUrl = wikiTitle
     ? `https://${wikiDomain}.wikipedia.org/wiki/${encodeURIComponent(wikiTitle)}`
     : undefined;
-
-  // Data helpers
-  const name = currentPerson.name[lang] || currentPerson.name.sv || currentPerson.name.en || 'Okänd';
-  const desc = currentPerson.description[lang] || currentPerson.description.sv || currentPerson.description.en || '';
-  const birthPlace = currentPerson.birthPlace;
-  const deathPlace = currentPerson.deathPlace;
-  const birthCoord = birthPlace?.coord;
-  const deathCoord = deathPlace?.coord;
-  const birthYear = currentPerson.birthDate.year;
-  const deathYear = currentPerson.deathDate?.year;
-  const isLiving = !deathYear;
-  const lifespan = deathYear ? deathYear - birthYear : new Date().getFullYear() - birthYear;
-  const distanceKm = birthCoord && deathCoord ? haversineKm(birthCoord, deathCoord) : null;
-
-  const occupations = currentPerson.occupations
-    .map((o) => o.name[lang] || o.name.sv || o.name.en)
-    .filter(Boolean);
-  const citizenship = currentPerson.citizenship
-    .map((c) => c.name[lang] || c.name.sv || c.name.en)
-    .filter(Boolean);
-  const works = currentPerson.notableWorks
-    .map((w) => w.name[lang] || w.name.sv || w.name.en)
-    .filter(Boolean);
 
   const matchCandidatesCount = useMemo(() => {
     return allPeople.filter((p) => {
       if (matchTier !== 'all' && p.tier !== matchTier) return false;
       if (!matchesCentury(p.birthDate.year, matchCentury)) return false;
+      if (!matchesLifeStatus(p, matchLifeStatus)) return false;
       if (matchOnlySwedish && !p.swedish) return false;
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
+      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
       return true;
     }).length;
-  }, [allPeople, matchTier, matchCentury, matchOnlySwedish]);
-
-  const getClueActionLabel = (clue: ClueType, cost: number) => {
-    const isRev = revealedClues.has(clue);
-    if (isSolved || isSurrendered) {
-      return isRev ? (isSv ? 'Dölj' : 'Hide') : (isSv ? 'Visa' : 'Show');
-    }
-    return isRev ? (isSv ? 'Dölj' : 'Hide') : `${isSv ? 'Avslöja' : 'Reveal'} (-${cost} p)`;
-  };
-
-  const getClueActionColor = (clue: ClueType) => {
-    if (revealedClues.has(clue)) return 'var(--text-muted)';
-    if (isSolved || isSurrendered) return 'var(--accent-blue)';
-    return 'var(--accent-gold-dark)';
-  };
+  }, [allPeople, matchTier, matchCentury, matchLifeStatus, matchOnlySwedish, requireBothCoords]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
-      {/* 1. HELDÄCKANDE KARTA (100% AV YTAN) */}
-      <div ref={mapContainerRef} style={{ width: '100%', height: '100%', zIndex: 1 }} />
-
-      {/* 2. TOPP-MITTEN OVERLAY: KOMPAKT FAKTA-HUD */}
-      <div
-        style={{
-          position: 'absolute',
-          top: isMobile ? '6px' : '14px',
-          left: isMobile ? '8px' : '50%',
-          right: isMobile ? '8px' : 'auto',
-          transform: isMobile ? 'none' : 'translateX(-50%)',
-          zIndex: 1000,
-          pointerEvents: 'none',
-          maxWidth: isMobile ? '100%' : '92vw',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '4px',
-        }}
-      >
+    <div
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        overflow: 'hidden',
+        display: isMobile ? 'flex' : 'block',
+        flexDirection: 'column',
+      }}
+    >
+      {/* MOBIL ZON 1: DOCKAD TOPPBALK MED LIVSRESA, SNABBKONTROLLER & SÖKFÄLT HÖGST UPP (TANGENTBORDSSÄKER!) */}
+      {isMobile && (
         <div
           style={{
-            pointerEvents: 'auto',
+            flexShrink: 0,
             background: '#ffffff',
-            padding: isMobile ? '6px 12px' : '9px 20px',
-            borderRadius: '999px',
-            border: '2px solid #cbd5e1',
-            boxShadow: '0 4px 20px rgba(0, 0, 0, 0.22)',
+            borderBottom: '1.5px solid var(--border-color)',
+            padding: '8px 10px',
+            zIndex: 1200,
+            boxShadow: '0 2px 10px rgba(0, 0, 0, 0.06)',
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: isMobile ? '6px' : '12px',
-            fontSize: isMobile ? '0.8rem' : '0.88rem',
-            whiteSpace: 'nowrap',
-            width: isMobile ? '100%' : 'auto',
-            overflow: 'hidden',
+            flexDirection: 'column',
+            gap: '7px',
           }}
         >
-          {/* Född */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px',
-              minWidth: 0,
-              background: '#f0fdf4',
-              border: '1px solid #86efac',
-              padding: isMobile ? '3px 8px' : '4px 10px',
-              borderRadius: '999px',
-            }}
-          >
-            <span style={{ fontSize: isMobile ? '0.82rem' : '0.95rem' }}>🐣</span>
-            <strong style={{ color: '#166534', fontWeight: 900, fontSize: isMobile ? '0.86rem' : '0.94rem' }}>
-              {birthYear}
-            </strong>
-            <span
+          {/* Rad 1: Livsresa (Född -> Död + Ålder) & Snabbknappar */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+            <div
               style={{
-                color: '#0f172a',
-                fontWeight: 700,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                maxWidth: isMobile ? '90px' : 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                minWidth: 0,
+                flex: 1,
+                overflowX: 'auto',
+                scrollbarWidth: 'none',
               }}
             >
-              {birthPlace
-                ? birthPlace.name[lang] || birthPlace.name.sv || birthPlace.name.en
-                : (isSv ? 'Okänd ort' : 'Unknown')}
-            </span>
-          </div>
-
-          <span style={{ color: '#94a3b8', fontWeight: 900, fontSize: isMobile ? '0.82rem' : '0.95rem' }}>➔</span>
-
-          {/* Död */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px',
-              minWidth: 0,
-              background: isLiving ? '#fff1f2' : '#fef2f2',
-              border: isLiving ? '1px solid #fecdd3' : '1px solid #fecaca',
-              padding: isMobile ? '3px 8px' : '4px 10px',
-              borderRadius: '999px',
-            }}
-          >
-            <span style={{ fontSize: isMobile ? '0.82rem' : '0.95rem' }}>{isLiving ? '❤️' : '🪦'}</span>
-            <strong
-              style={{
-                color: isLiving ? '#be123c' : '#991b1b',
-                fontWeight: 900,
-                fontSize: isMobile ? '0.86rem' : '0.94rem',
-              }}
-            >
-              {isLiving ? (isSv ? 'Levande' : 'Alive') : deathYear}
-            </strong>
-            {!isLiving && (
-              <span
+              {/* Född */}
+              <div
                 style={{
-                  color: '#0f172a',
-                  fontWeight: 700,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  maxWidth: isMobile ? '90px' : 'none',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  background: '#f0fdf4',
+                  border: '1px solid #86efac',
+                  padding: '4px 8px',
+                  borderRadius: '999px',
+                  flexShrink: 0,
                 }}
               >
-                {deathPlace
-                  ? deathPlace.name[lang] || deathPlace.name.sv || deathPlace.name.en
-                  : (isSv ? 'Okänd ort' : 'Unknown')}
+                <span style={{ fontSize: '0.88rem' }}>🐣</span>
+                <strong style={{ color: '#166534', fontWeight: 900, fontSize: '0.88rem' }}>{birthYear}</strong>
+                <span
+                  style={{
+                    color: '#0f172a',
+                    fontWeight: 700,
+                    fontSize: '0.84rem',
+                    maxWidth: '92px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {safeBirthPlaceLabel}
+                </span>
+              </div>
+
+              <span style={{ color: '#94a3b8', fontWeight: 900, fontSize: '0.82rem', flexShrink: 0 }}>➔</span>
+
+              {/* Död */}
+              <div
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  background: isLiving ? '#fff1f2' : '#fef2f2',
+                  border: isLiving ? '1px solid #fecdd3' : '1px solid #fecaca',
+                  padding: '4px 8px',
+                  borderRadius: '999px',
+                  flexShrink: 0,
+                }}
+              >
+                <span style={{ fontSize: '0.88rem' }}>{isLiving ? '❤️' : '🪦'}</span>
+                <strong style={{ color: isLiving ? '#be123c' : '#991b1b', fontWeight: 900, fontSize: '0.88rem' }}>
+                  {isLiving ? (isSv ? 'Nu' : 'Now') : deathYear}
+                </strong>
+                {!isLiving && (
+                  <span
+                    style={{
+                      color: '#0f172a',
+                      fontWeight: 700,
+                      fontSize: '0.84rem',
+                      maxWidth: '92px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {safeDeathPlaceLabel}
+                  </span>
+                )}
+              </div>
+
+              {/* Ålder */}
+              <span
+                style={{
+                  background: '#eff6ff',
+                  border: '1px solid #bfdbfe',
+                  color: '#1e40af',
+                  padding: '4px 7px',
+                  borderRadius: '999px',
+                  fontWeight: 800,
+                  fontSize: '0.78rem',
+                  flexShrink: 0,
+                }}
+              >
+                {lifespan} {isSv ? 'år' : 'yr'}
               </span>
-            )}
+            </div>
+
+            {/* Snabbknappar (Filter, Ny, Match) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+              {!isMatchActive && (
+                <>
+                  <button
+                    onClick={() => setShowMobileFilterModal(true)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '4px',
+                      minHeight: '34px',
+                      padding: '5px 9px',
+                      borderRadius: '10px',
+                      background:
+                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || requireBothCoords
+                          ? 'var(--accent-blue)'
+                          : '#f8fafc',
+                      color:
+                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || requireBothCoords
+                          ? '#fff'
+                          : 'var(--text-primary)',
+                      border: '1px solid var(--border-color)',
+                      fontWeight: 800,
+                      fontSize: '0.78rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Filter' : 'Filters'}
+                  >
+                    <SlidersHorizontal size={14} />
+                  </button>
+
+                  <button
+                    onClick={() => handleNextPerson()}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '4px',
+                      minHeight: '34px',
+                      padding: '5px 9px',
+                      borderRadius: '10px',
+                      background: '#f8fafc',
+                      color: 'var(--text-primary)',
+                      border: '1px solid var(--border-color)',
+                      fontWeight: 800,
+                      fontSize: '0.78rem',
+                      cursor: 'pointer',
+                    }}
+                    title={isSv ? 'Ny gåta' : 'New puzzle'}
+                  >
+                    <Shuffle size={14} style={{ color: 'var(--accent-gold-dark)' }} />
+                  </button>
+                </>
+              )}
+
+              <button
+                onClick={() => {
+                  if (isMatchActive) {
+                    if (confirm(isSv ? 'Avbryta matchen?' : 'Cancel match?')) {
+                      cancelMatch();
+                    }
+                  } else {
+                    setMatchCentury(selectedCentury);
+                    setMatchTier(selectedTier);
+                    setMatchLifeStatus(lifeStatus);
+                    setMatchOnlySwedish(onlySwedish);
+                    setShowMatchModal(true);
+                  }
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '4px',
+                  minHeight: '34px',
+                  padding: '5px 9px',
+                  borderRadius: '10px',
+                  background: isMatchActive ? 'linear-gradient(135deg, #1e3a8a, #2563eb)' : '#eff6ff',
+                  color: isMatchActive ? '#fff' : '#1e3a8a',
+                  border: isMatchActive ? 'none' : '1px solid #bfdbfe',
+                  fontWeight: 800,
+                  fontSize: '0.78rem',
+                  cursor: 'pointer',
+                }}
+                title="Match"
+              >
+                <Trophy size={14} style={{ color: isMatchActive ? '#fbbf24' : '#2563eb' }} />
+                {isMatchActive && <span>{currentRoundIndex + 1}/5</span>}
+              </button>
+            </div>
           </div>
 
-          {/* Divider */}
-          <div style={{ width: '1px', height: '16px', background: '#cbd5e1', flexShrink: 0 }} />
-
-          {/* Livslängd & Sträcka */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
-            <span
+          {/* Eventuell varning om en ort saknar koordinater */}
+          {(!birthCoord || (!deathCoord && !isLiving)) && (
+            <div
               style={{
-                background: '#eff6ff',
-                border: '1px solid #bfdbfe',
-                color: '#1e40af',
-                padding: '3px 8px',
-                borderRadius: '999px',
-                fontWeight: 800,
-                fontSize: isMobile ? '0.76rem' : '0.82rem',
+                background: '#fef3c7',
+                color: '#92400e',
+                border: '1px solid #fde68a',
+                padding: '3px 10px',
+                borderRadius: '8px',
+                fontSize: '0.76rem',
+                fontWeight: 700,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
               }}
             >
-              {lifespan} {isSv ? 'år' : 'yr'}
-            </span>
-            {!isMobile && distanceKm !== null && (
-              <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 700 }}>
-                {distanceKm === 0 ? (isSv ? 'Samma ort' : 'Same city') : `${distanceKm.toLocaleString('sv-SE')} km`}
+              <AlertTriangle size={13} />
+              <span>
+                {!birthCoord && !deathCoord
+                  ? isSv
+                    ? 'Inga koordinater'
+                    : 'No coordinates'
+                  : !birthCoord
+                  ? isSv
+                    ? `"${safeBirthPlaceLabel}" saknar koordinater`
+                    : `"${safeBirthPlaceLabel}" lacks coords`
+                  : isSv
+                  ? `"${safeDeathPlaceLabel}" saknar koordinater`
+                  : `"${safeDeathPlaceLabel}" lacks coords`}
               </span>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* Rad 2: Topp-dockat Sökfält (under pågående gissning) ELLER Snabb resultatrad (efter avslutad gåta) */}
+          {!isSolved && !isSurrendered ? (
+            <div style={{ position: 'relative' }}>
+              <Search
+                size={18}
+                style={{
+                  position: 'absolute',
+                  left: '12px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  color: 'var(--accent-blue)',
+                  pointerEvents: 'none',
+                }}
+              />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setShowSuggestions(true);
+                }}
+                onFocus={() => setShowSuggestions(true)}
+                placeholder={isSv ? 'Gissa vem personen är...' : 'Guess who it is...'}
+                style={{
+                  width: '100%',
+                  padding: '10px 38px 10px 38px',
+                  borderRadius: '10px',
+                  border: '2px solid var(--border-focus)',
+                  fontSize: '16px',
+                  fontWeight: 600,
+                  outline: 'none',
+                  background: '#fcfaf5',
+                  color: '#0f172a',
+                }}
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  style={{
+                    position: 'absolute',
+                    right: '4px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    width: '34px',
+                    height: '34px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <X size={18} />
+                </button>
+              )}
+
+              {/* Autocomplete-dropdown öppnas NEDÅT från topp-sökfältet så tangentbordet aldrig täcker den! */}
+              {showSuggestions && suggestions.length > 0 && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 5px)',
+                    left: 0,
+                    right: 0,
+                    background: '#ffffff',
+                    borderRadius: '12px',
+                    border: '2px solid var(--accent-blue)',
+                    boxShadow: '0 14px 36px rgba(0, 0, 0, 0.28)',
+                    zIndex: 9999,
+                    maxHeight: '220px',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {suggestions.map((p) => {
+                    const pName = loc(p.name, lang, isSv ? 'Okänd' : 'Unknown');
+                    const alreadyGuessed = wrongGuesses.some((wg) => wg.id === p.id);
+                    return (
+                      <div
+                        key={p.id}
+                        onClick={() => {
+                          if (!alreadyGuessed) handleSelectGuess(p);
+                        }}
+                        style={{
+                          padding: '12px 14px',
+                          minHeight: '46px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          borderBottom: '1px solid #f1f5f9',
+                          cursor: alreadyGuessed ? 'not-allowed' : 'pointer',
+                          background: alreadyGuessed ? '#f8fafc' : '#ffffff',
+                          opacity: alreadyGuessed ? 0.6 : 1,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                          <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>{alreadyGuessed ? '👻' : '👤'}</span>
+                          <span style={{ fontWeight: 800, fontSize: '0.96rem', color: '#0f172a' }}>{pName}</span>
+                        </div>
+                        {alreadyGuessed ? (
+                          <span style={{ fontSize: '0.78rem', color: '#94a3b8', fontWeight: 700, flexShrink: 0 }}>
+                            {isSv ? 'Redan gissad' : 'Guessed'}
+                          </span>
+                        ) : (
+                          <span
+                            style={{
+                              fontSize: '0.8rem',
+                              color: '#ffffff',
+                              background: 'var(--accent-blue)',
+                              padding: '4px 10px',
+                              borderRadius: '999px',
+                              fontWeight: 800,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {isSv ? 'Gissa' : 'Guess'}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px',
+                padding: '6px 10px',
+                borderRadius: '10px',
+                background: isSolved ? '#dcfce7' : '#fee2e2',
+                border: `1.5px solid ${isSolved ? '#4ade80' : '#fca5a5'}`,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                <span>{isSolved ? '🎉' : '👀'}</span>
+                <strong
+                  style={{
+                    fontSize: '0.95rem',
+                    color: '#0f172a',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {name}
+                </strong>
+                {isSolved && (
+                  <span
+                    style={{
+                      background: '#166534',
+                      color: '#fff',
+                      fontSize: '0.78rem',
+                      fontWeight: 800,
+                      padding: '2px 7px',
+                      borderRadius: '999px',
+                      flexShrink: 0,
+                    }}
+                  >
+                    +{score} p
+                  </span>
+                )}
+              </div>
+
+              <button
+                onClick={() => {
+                  if (isMatchActive) {
+                    if (currentRoundIndex < 4) handleNextMatchRound();
+                    else setIsMatchSummaryOpen(true);
+                  } else {
+                    handleNextPerson();
+                  }
+                }}
+                style={{
+                  background: 'var(--accent-blue)',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '0.84rem',
+                  fontWeight: 800,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  flexShrink: 0,
+                  cursor: 'pointer',
+                }}
+              >
+                <span>{isSv ? 'Nästa' : 'Next'}</span>
+                <ArrowRight size={14} />
+              </button>
+            </div>
+          )}
         </div>
+      )}
 
-        {/* Varning om en ort saknar koordinater */}
-        {(!birthCoord || (!deathCoord && !isLiving)) && (
-          <div
-            style={{
-              pointerEvents: 'auto',
-              background: 'rgba(254, 243, 199, 0.95)',
-              color: '#92400e',
-              border: '1px solid #fde68a',
-              padding: isMobile ? '2px 8px' : '4px 12px',
-              borderRadius: '999px',
-              fontSize: isMobile ? '0.68rem' : '0.74rem',
-              fontWeight: 600,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-            }}
-          >
-            <AlertTriangle size={12} />
-            <span>
-              {!birthCoord && !deathCoord
-                ? (isSv ? 'Inga koordinater' : 'No coordinates')
-                : !birthCoord
-                ? (isSv ? `"${birthPlace?.name.sv}" saknar koordinater` : 'Birthplace lacks coords')
-                : (isSv ? `"${deathPlace?.name.sv}" saknar koordinater` : 'Deathplace lacks coords')}
-            </span>
-          </div>
-        )}
-      </div>
+      {/* 1. KARTYTA (PÅ MOBIL: DEDIKERAD FRILAGD FLEX-YTA MELLAN TOPP & BOTTEN; PÅ DESKTOP: 100% HELSKÄRM) */}
+      <div
+        ref={mapContainerRef}
+        style={{
+          width: '100%',
+          flex: isMobile ? 1 : undefined,
+          height: isMobile ? 'auto' : '100%',
+          minHeight: isMobile ? '150px' : undefined,
+          zIndex: 1,
+        }}
+      />
 
-      {/* 3. SNABBKONTROLLER & FILTER (MOBIL vs DESKTOP) */}
-      {isMobile ? (
+      {/* 2. DESKTOP TOPP-MITTEN OVERLAY: KOMPAKT FAKTA-HUD */}
+      {!isMobile && (
         <div
           style={{
             position: 'absolute',
-            top: '42px',
-            left: '8px',
-            right: '8px',
+            top: '14px',
+            left: '50%',
+            transform: 'translateX(-50%)',
             zIndex: 1000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '6px',
             pointerEvents: 'none',
+            maxWidth: '92vw',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '4px',
           }}
         >
-          <div style={{ display: 'flex', gap: '5px', pointerEvents: 'auto' }}>
-            {/* Filter-knapp med indikator om aktiva filter */}
-            <button
-              onClick={() => setShowMobileFilterModal(true)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                padding: '5px 9px',
-                borderRadius: '999px',
-                background: (selectedCentury !== 'all' || selectedTier !== 'guess' || onlySwedish || requireBothCoords)
-                  ? 'var(--accent-blue)'
-                  : 'rgba(255, 255, 255, 0.94)',
-                color: (selectedCentury !== 'all' || selectedTier !== 'guess' || onlySwedish || requireBothCoords)
-                  ? '#fff'
-                  : 'var(--text-primary)',
-                border: '1px solid var(--border-color)',
-                fontWeight: 700,
-                fontSize: '0.74rem',
-                backdropFilter: 'blur(10px)',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-                cursor: 'pointer',
-              }}
-            >
-              <SlidersHorizontal size={12} />
-              <span>{isSv ? 'Filter' : 'Filters'}</span>
-              {(selectedCentury !== 'all' || selectedTier !== 'guess' || onlySwedish || requireBothCoords) && (
-                <span
-                  style={{
-                    background: '#fbbf24',
-                    borderRadius: '50%',
-                    width: '6px',
-                    height: '6px',
-                    display: 'inline-block',
-                  }}
-                />
-              )}
-            </button>
-
-            {/* Ny gåta */}
-            <button
-              onClick={() => handleNextPerson()}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                padding: '5px 9px',
-                borderRadius: '999px',
-                background: 'rgba(255, 255, 255, 0.94)',
-                color: 'var(--text-primary)',
-                border: '1px solid var(--border-color)',
-                fontWeight: 700,
-                fontSize: '0.74rem',
-                backdropFilter: 'blur(10px)',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-                cursor: 'pointer',
-              }}
-            >
-              <Shuffle size={12} style={{ color: 'var(--accent-gold)' }} />
-              <span>{isSv ? 'Ny' : 'New'}</span>
-            </button>
-          </div>
-
-          {/* Match-knapp */}
-          <button
-            onClick={() => {
-              if (isMatchActive) {
-                if (confirm(isSv ? 'Avbryta matchen?' : 'Cancel match?')) {
-                  cancelMatch();
-                }
-              } else {
-                setMatchCentury(selectedCentury);
-                setMatchTier(selectedTier);
-                setMatchOnlySwedish(onlySwedish);
-                setShowMatchModal(true);
-              }
-            }}
+          <div
             style={{
               pointerEvents: 'auto',
+              background: '#ffffff',
+              padding: '9px 20px',
+              borderRadius: '999px',
+              border: '2px solid #cbd5e1',
+              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.22)',
               display: 'flex',
               alignItems: 'center',
-              gap: '4px',
-              padding: '5px 9px',
-              borderRadius: '999px',
-              background: isMatchActive ? 'linear-gradient(135deg, #1e3a8a, #2563eb)' : 'rgba(255, 255, 255, 0.94)',
-              color: isMatchActive ? '#fff' : '#1e3a8a',
-              border: isMatchActive ? 'none' : '1.5px solid #2563eb',
-              fontWeight: 800,
-              fontSize: '0.74rem',
-              backdropFilter: 'blur(10px)',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-              cursor: 'pointer',
+              justifyContent: 'center',
+              gap: '12px',
+              fontSize: '0.88rem',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
             }}
           >
-            <Trophy size={12} style={{ color: isMatchActive ? '#fbbf24' : '#2563eb' }} />
-            <span>{isMatchActive ? `${currentRoundIndex + 1}/5` : (isSv ? 'Match' : 'Match')}</span>
-          </button>
+            {/* Född */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                minWidth: 0,
+                background: '#f0fdf4',
+                border: '1px solid #86efac',
+                padding: '4px 10px',
+                borderRadius: '999px',
+              }}
+            >
+              <span style={{ fontSize: '0.95rem' }}>🐣</span>
+              <strong style={{ color: '#166534', fontWeight: 900, fontSize: '0.94rem' }}>{birthYear}</strong>
+              <span style={{ color: '#0f172a', fontWeight: 700 }}>{safeBirthPlaceLabel}</span>
+            </div>
+
+            <span style={{ color: '#94a3b8', fontWeight: 900, fontSize: '0.95rem' }}>➔</span>
+
+            {/* Död */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                minWidth: 0,
+                background: isLiving ? '#fff1f2' : '#fef2f2',
+                border: isLiving ? '1px solid #fecdd3' : '1px solid #fecaca',
+                padding: '4px 10px',
+                borderRadius: '999px',
+              }}
+            >
+              <span style={{ fontSize: '0.95rem' }}>{isLiving ? '❤️' : '🪦'}</span>
+              <strong style={{ color: isLiving ? '#be123c' : '#991b1b', fontWeight: 900, fontSize: '0.94rem' }}>
+                {isLiving ? (isSv ? 'Levande' : 'Alive') : deathYear}
+              </strong>
+              {!isLiving && <span style={{ color: '#0f172a', fontWeight: 700 }}>{safeDeathPlaceLabel}</span>}
+            </div>
+
+            {/* Divider */}
+            <div style={{ width: '1px', height: '16px', background: '#cbd5e1', flexShrink: 0 }} />
+
+            {/* Livslängd & Sträcka */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+              <span
+                style={{
+                  background: '#eff6ff',
+                  border: '1px solid #bfdbfe',
+                  color: '#1e40af',
+                  padding: '3px 8px',
+                  borderRadius: '999px',
+                  fontWeight: 800,
+                  fontSize: '0.82rem',
+                }}
+              >
+                {lifespan} {isSv ? 'år' : 'yr'}
+              </span>
+              {distanceKm !== null && (
+                <span style={{ fontSize: '0.78rem', color: '#475569', fontWeight: 700 }}>
+                  {distanceKm === 0 ? (isSv ? 'Samma ort' : 'Same city') : `${distanceKm.toLocaleString('sv-SE')} km`}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Varning om en ort saknar koordinater */}
+          {(!birthCoord || (!deathCoord && !isLiving)) && (
+            <div
+              style={{
+                pointerEvents: 'auto',
+                background: 'rgba(254, 243, 199, 0.95)',
+                color: '#92400e',
+                border: '1px solid #fde68a',
+                padding: '4px 12px',
+                borderRadius: '999px',
+                fontSize: '0.74rem',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+              }}
+            >
+              <AlertTriangle size={12} />
+              <span>
+                {!birthCoord && !deathCoord
+                  ? isSv
+                    ? 'Inga koordinater'
+                    : 'No coordinates'
+                  : !birthCoord
+                  ? isSv
+                    ? `"${safeBirthPlaceLabel}" saknar koordinater`
+                    : `"${safeBirthPlaceLabel}" lacks coords`
+                  : isSv
+                  ? `"${safeDeathPlaceLabel}" saknar koordinater`
+                  : `"${safeDeathPlaceLabel}" lacks coords`}
+              </span>
+            </div>
+          )}
         </div>
-      ) : (
-        /* Desktop: Den kompletta raden med alla kontroller */
+      )}
+
+      {/* 3. DESKTOP SNABBKONTROLLER & FILTER */}
+      {!isMobile && (
         <div
           style={{
             position: 'absolute',
@@ -1062,38 +1867,60 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             maxWidth: 'calc(100vw - 420px)',
           }}
         >
-          {/* Nivå 1 (Mest kända) vs Nivå 2 (Referens/Svårare) vs Alla */}
-          <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
+          {/* Svårighetsgrad: Lätt (Ikoner) / Medel (Allmänbildning) / Svår (Nisch) / Alla */}
+          <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden', opacity: isMatchActive ? 0.55 : 1 }}>
             <button
-              onClick={() => handleTierChange('guess')}
+              disabled={isMatchActive}
+              onClick={() => handleTierChange('easy')}
               style={{
                 padding: '5px 9px',
-                background: selectedTier === 'guess' ? 'var(--accent-blue)' : '#fff',
-                color: selectedTier === 'guess' ? '#fff' : 'var(--text-secondary)',
+                background: selectedTier === 'easy' ? 'var(--accent-blue)' : '#fff',
+                color: selectedTier === 'easy' ? '#fff' : 'var(--text-secondary)',
                 border: 'none',
-                fontWeight: selectedTier === 'guess' ? 800 : 500,
+                fontWeight: selectedTier === 'easy' ? 800 : 500,
                 fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
               }}
-              title={isSv ? 'Nivå 1: Mest kända personerna (Rekommenderat!)' : 'Tier 1: Most famous'}
+              title={isSv ? 'Lätt: Mest kända personerna & ikonerna' : 'Easy: Most famous icons'}
             >
-              ⭐ {isSv ? 'Nivå 1: Kända' : 'Tier 1: Famous'}
+              ⭐ {isSv ? 'Lätt' : 'Easy'}
             </button>
             <button
-              onClick={() => handleTierChange('reference')}
+              disabled={isMatchActive}
+              onClick={() => handleTierChange('medium')}
               style={{
                 padding: '5px 9px',
-                background: selectedTier === 'reference' ? 'var(--accent-blue)' : '#fff',
-                color: selectedTier === 'reference' ? '#fff' : 'var(--text-secondary)',
+                background: selectedTier === 'medium' ? 'var(--accent-blue)' : '#fff',
+                color: selectedTier === 'medium' ? '#fff' : 'var(--text-secondary)',
                 border: 'none',
                 borderLeft: '1px solid var(--border-color)',
-                fontWeight: selectedTier === 'reference' ? 800 : 500,
+                fontWeight: selectedTier === 'medium' ? 800 : 500,
                 fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
               }}
-              title={isSv ? 'Nivå 2: Fördjupad referenspool (Svårare personer)' : 'Tier 2: Reference (Harder)'}
+              title={isSv ? 'Medel: God allmänbildning' : 'Medium: General knowledge'}
             >
-              📚 {isSv ? 'Nivå 2: Svårare' : 'Tier 2'}
+              📚 {isSv ? 'Medel' : 'Med'}
             </button>
             <button
+              disabled={isMatchActive}
+              onClick={() => handleTierChange('hard')}
+              style={{
+                padding: '5px 9px',
+                background: selectedTier === 'hard' ? 'var(--accent-blue)' : '#fff',
+                color: selectedTier === 'hard' ? '#fff' : 'var(--text-secondary)',
+                border: 'none',
+                borderLeft: '1px solid var(--border-color)',
+                fontWeight: selectedTier === 'hard' ? 800 : 500,
+                fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
+              }}
+              title={isSv ? 'Svår: Fördjupad nisch & historia' : 'Hard: In-depth & niche'}
+            >
+              🔥 {isSv ? 'Svår' : 'Hard'}
+            </button>
+            <button
+              disabled={isMatchActive}
               onClick={() => handleTierChange('all')}
               style={{
                 padding: '5px 9px',
@@ -1103,16 +1930,18 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                 borderLeft: '1px solid var(--border-color)',
                 fontWeight: selectedTier === 'all' ? 800 : 500,
                 fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
               }}
-              title={isSv ? 'Alla personer (både kända och fördjupade)' : 'All people'}
+              title={isSv ? 'Alla personer' : 'All people'}
             >
               {isSv ? 'Alla' : 'All'}
             </button>
           </div>
 
           {/* Århundrade / Sekel Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', opacity: isMatchActive ? 0.55 : 1 }}>
             <select
+              disabled={isMatchActive}
               value={selectedCentury}
               onChange={(e) => handleCenturyChange(e.target.value)}
               style={{
@@ -1123,7 +1952,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                 color: 'var(--text-primary)',
                 fontWeight: 700,
                 fontSize: '0.76rem',
-                cursor: 'pointer',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
                 outline: 'none',
               }}
               title={isSv ? 'Filtrera på personens födelsesekel' : 'Filter by birth century'}
@@ -1136,8 +1965,72 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             </select>
           </div>
 
+          {/* Livsstatus / Spelläge: Historiska (standard) vs Nu levande */}
+          <div
+            style={{
+              display: 'inline-flex',
+              borderRadius: '6px',
+              border: '1px solid var(--border-color)',
+              overflow: 'hidden',
+              background: '#fff',
+              opacity: isMatchActive ? 0.55 : 1,
+            }}
+          >
+            <button
+              disabled={isMatchActive}
+              onClick={() => handleLifeStatusChange('historical')}
+              style={{
+                padding: '5px 9px',
+                background: lifeStatus === 'historical' ? '#7c2d12' : '#fff',
+                color: lifeStatus === 'historical' ? '#fff' : 'var(--text-secondary)',
+                border: 'none',
+                fontWeight: lifeStatus === 'historical' ? 800 : 500,
+                fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
+              }}
+              title={isSv ? 'Endast historiska (avlidna) personer med komplett livsresa' : 'Only historical (deceased) figures with complete life journeys'}
+            >
+              🏛️ {isSv ? 'Historiska' : 'Historical'}
+            </button>
+            <button
+              disabled={isMatchActive}
+              onClick={() => handleLifeStatusChange('living')}
+              style={{
+                padding: '5px 9px',
+                background: lifeStatus === 'living' ? '#be123c' : '#fff',
+                color: lifeStatus === 'living' ? '#fff' : 'var(--text-secondary)',
+                border: 'none',
+                borderLeft: '1px solid var(--border-color)',
+                fontWeight: lifeStatus === 'living' ? 800 : 500,
+                fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
+              }}
+              title={isSv ? 'Endast nu levande personer (Profil-ledtråd gratis!)' : 'Only living people (free Profile clue!)'}
+            >
+              🌟 {isSv ? 'Nu levande' : 'Living'}
+            </button>
+            <button
+              disabled={isMatchActive}
+              onClick={() => handleLifeStatusChange('all')}
+              style={{
+                padding: '5px 8px',
+                background: lifeStatus === 'all' ? 'var(--accent-blue)' : '#fff',
+                color: lifeStatus === 'all' ? '#fff' : 'var(--text-secondary)',
+                border: 'none',
+                borderLeft: '1px solid var(--border-color)',
+                fontWeight: lifeStatus === 'all' ? 800 : 500,
+                fontSize: '0.76rem',
+                cursor: isMatchActive ? 'not-allowed' : 'pointer',
+              }}
+              title={isSv ? 'Både historiska och nu levande' : 'Both historical and living'}
+            >
+              {isSv ? 'Båda' : 'Both'}
+            </button>
+          </div>
+
           {/* Svensk filter-knapp */}
           <button
+            disabled={isMatchActive}
             onClick={handleSwedishToggle}
             style={{
               padding: '5px 9px',
@@ -1147,6 +2040,8 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               color: onlySwedish ? '#137333' : 'var(--text-secondary)',
               fontWeight: 700,
               fontSize: '0.76rem',
+              opacity: isMatchActive ? 0.55 : 1,
+              cursor: isMatchActive ? 'not-allowed' : 'pointer',
             }}
             title={isSv ? 'Bara personer med svensk koppling' : 'Only Swedish people'}
           >
@@ -1155,13 +2050,16 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
           {/* Hel resa filter-knapp */}
           <button
+            disabled={isMatchActive}
             onClick={() => {
+              if (isMatchActive) return;
               const nextVal = !requireBothCoords;
               setRequireBothCoords(nextVal);
               if (nextVal && (!currentPerson.birthPlace?.coord || (!currentPerson.deathPlace?.coord && currentPerson.deathDate))) {
                 const candidates = allPeople.filter((p) => {
                   if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
                   if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
+                  if (!matchesLifeStatus(p, lifeStatus)) return false;
                   if (onlySwedish && !p.swedish) return false;
                   if (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate)) return false;
                   return true;
@@ -1179,6 +2077,8 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               color: requireBothCoords ? '#92400e' : 'var(--text-secondary)',
               fontWeight: 700,
               fontSize: '0.76rem',
+              opacity: isMatchActive ? 0.55 : 1,
+              cursor: isMatchActive ? 'not-allowed' : 'pointer',
             }}
             title={isSv ? 'Kräver både födelse- och dödsort på kartan' : 'Require both coords on map'}
           >
@@ -1190,28 +2090,30 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             ({eligiblePeople.length} {isSv ? 'st' : ''})
           </span>
 
-          {/* Ny gåta-knapp */}
-          <button
-            onClick={() => handleNextPerson()}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              padding: '5px 11px',
-              borderRadius: '6px',
-              background: 'var(--accent-gold)',
-              color: '#fff',
-              border: 'none',
-              fontWeight: 800,
-              fontSize: '0.78rem',
-              cursor: 'pointer',
-              boxShadow: '0 2px 4px rgba(197, 155, 39, 0.3)',
-            }}
-            title={isSv ? 'Slumpa en ny person utifrån dina filter' : 'New random mystery person'}
-          >
-            <Shuffle size={13} />
-            {isSv ? 'Ny gåta' : 'New'}
-          </button>
+          {/* Ny gåta-knapp (döljs under pågående match) */}
+          {!isMatchActive && (
+            <button
+              onClick={() => handleNextPerson()}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '5px 11px',
+                borderRadius: '6px',
+                background: 'var(--accent-gold)',
+                color: '#fff',
+                border: 'none',
+                fontWeight: 800,
+                fontSize: '0.78rem',
+                cursor: 'pointer',
+                boxShadow: '0 2px 4px rgba(197, 155, 39, 0.3)',
+              }}
+              title={isSv ? 'Slumpa en ny person utifrån dina filter' : 'New random mystery person'}
+            >
+              <Shuffle size={13} />
+              {isSv ? 'Ny gåta' : 'New'}
+            </button>
+          )}
 
           {/* Spela match-knapp */}
           <button
@@ -1223,6 +2125,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               } else {
                 setMatchCentury(selectedCentury);
                 setMatchTier(selectedTier);
+                setMatchLifeStatus(lifeStatus);
                 setMatchOnlySwedish(onlySwedish);
                 setShowMatchModal(true);
               }
@@ -1245,13 +2148,254 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
           >
             <Trophy size={13} style={{ color: isMatchActive ? '#fbbf24' : '#2563eb' }} />
             {isMatchActive
-              ? (isSv ? `Match (${currentRoundIndex + 1}/5)` : `Match (${currentRoundIndex + 1}/5)`)
-              : (isSv ? '🏆 Spela match (5 gåtor)' : '🏆 Play match (5 rounds)')}
+              ? isSv
+                ? `Avbryt match (${currentRoundIndex + 1}/5)`
+                : `Cancel match (${currentRoundIndex + 1}/5)`
+              : isSv
+              ? '🏆 Spela match (5 gåtor)'
+              : '🏆 Play match (5 rounds)'}
           </button>
         </div>
       )}
 
-      {/* 4. FLYTANDE SIDOPANEL / OVERLAY (HÖGER SIDA PÅ DESKTOP / BOTTOM SHEET PÅ MOBIL): GISSA & LEDTRÅDAR */}
+      {/* MOBIL ZON 3: DOCKAD BOTTENBALK (POÄNG + SENASTE SPÅRJAKT + STOR LEDTRÅDSKNAPP) */}
+      {isMobile && (
+        <div
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          style={{
+            flexShrink: 0,
+            background: '#ffffff',
+            borderTop: '1.5px solid var(--border-color)',
+            padding: '8px 12px calc(8px + env(safe-area-inset-bottom, 0px))',
+            zIndex: 1100,
+            boxShadow: '0 -3px 14px rgba(0, 0, 0, 0.08)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+          }}
+        >
+          {/* Om användaren gissat fel: visa senaste gissningens spårkort direkt i bottenbalken med läsbar text! */}
+          {!isSolved && !isSurrendered && guessFeedbacks.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#475569' }}>
+                  {isSv ? `Senaste gissning (${guessFeedbacks.length}):` : `Latest guess (${guessFeedbacks.length}):`}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {guessFeedbacks.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setIsMobileSheetExpanded(true)}
+                      style={{
+                        background: '#eff6ff',
+                        border: '1px solid #bfdbfe',
+                        color: '#1d4ed8',
+                        borderRadius: '999px',
+                        padding: '3px 9px',
+                        fontSize: '0.76rem',
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {isSv ? `Alla (${guessFeedbacks.length}) ▲` : `All (${guessFeedbacks.length}) ▲`}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowGhostPins((v) => !v)}
+                    style={{
+                      background: showGhostPins ? '#f1f5f9' : '#fff',
+                      border: '1px solid #cbd5e1',
+                      color: showGhostPins ? '#334155' : '#94a3b8',
+                      borderRadius: '999px',
+                      padding: '3px 9px',
+                      fontSize: '0.76rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                    }}
+                  >
+                    <span>👻</span>
+                    <span>{showGhostPins ? (isSv ? 'Nålar: På' : 'Pins: On') : (isSv ? 'Nålar: Av' : 'Pins: Off')}</span>
+                  </button>
+                </div>
+              </div>
+
+              {guessFeedbacks.slice(0, 1).map((fb) => (
+                <div
+                  key={fb.guessed.id}
+                  onClick={() => focusPersonOnMap(fb.guessed)}
+                  style={{
+                    background: '#f8fafc',
+                    border: '1px solid #cbd5e1',
+                    borderLeft: fb.positiveBadges.length > 0 ? '4px solid #16a34a' : '4px solid #ef4444',
+                    borderRadius: '10px',
+                    padding: '7px 10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                      <span style={{ color: '#dc2626', fontWeight: 900, fontSize: '0.84rem' }}>✕</span>
+                      <span
+                        style={{
+                          fontWeight: 800,
+                          fontSize: '0.9rem',
+                          color: '#0f172a',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {fb.name}
+                      </span>
+                      <span style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 600, flexShrink: 0 }}>
+                        ({fb.lifespanText})
+                      </span>
+                    </div>
+                    <span style={{ fontSize: '0.76rem', color: '#334155', fontWeight: 800, flexShrink: 0 }}>
+                      {fb.eraText}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', alignItems: 'center' }}>
+                    {fb.positiveBadges.length > 0 ? (
+                      fb.positiveBadges.map((badge, bIdx) => (
+                        <span
+                          key={bIdx}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            background: '#dcfce7',
+                            color: '#166534',
+                            border: '1px solid #86efac',
+                            padding: '2px 8px',
+                            borderRadius: '999px',
+                            fontSize: '0.76rem',
+                            fontWeight: 800,
+                          }}
+                        >
+                          <span>{badge.icon}</span>
+                          <span>{badge.label}</span>
+                        </span>
+                      ))
+                    ) : (
+                      <span style={{ fontSize: '0.76rem', color: '#64748b', fontStyle: 'italic' }}>
+                        {isSv ? 'Ingen träff på kategori, yrke eller ort' : 'No match on category, occupation, or place'}
+                      </span>
+                    )}
+                    {fb.birthDistanceKm !== null && !fb.sameBirthPlace && (
+                      <span
+                        style={{
+                          marginLeft: 'auto',
+                          fontSize: '0.75rem',
+                          color: '#475569',
+                          fontWeight: 700,
+                          flexShrink: 0,
+                        }}
+                      >
+                        📍 {fb.birthDistanceKm} km
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Nedersta raden i dockade bottenbalken: Aktuell poäng + Stor tumvänlig knapp för Ledtrådar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                padding: '9px 13px',
+                borderRadius: '12px',
+                background: '#fff9e6',
+                border: '1.5px solid #fbbf24',
+                color: '#92400e',
+                fontWeight: 900,
+                fontSize: '0.92rem',
+                flexShrink: 0,
+              }}
+            >
+              <Sparkles size={15} style={{ color: '#d97706' }} />
+              <span>{isSolved || isSurrendered ? `${score} p` : `${currentPotentialScore} p`}</span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsMobileSheetExpanded(true)}
+              style={{
+                flex: 1,
+                minHeight: '44px',
+                padding: '10px 14px',
+                borderRadius: '12px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
+                color: '#ffffff',
+                fontWeight: 800,
+                fontSize: '0.92rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 12px rgba(37, 99, 235, 0.28)',
+                cursor: 'pointer',
+              }}
+            >
+              <span>
+                {isSolved || isSurrendered
+                  ? isSv
+                    ? '📖 Visa biografi & alla fakta'
+                    : '📖 View biography & facts'
+                  : isSv
+                  ? `🧩 Visa ledtrådar (${purchasedClues.size}/${availableClues.length})`
+                  : `🧩 View clues (${purchasedClues.size}/${availableClues.length})`}
+              </span>
+              {(deducedProfileHint || deducedOccupationHint) && !isSolved && !isSurrendered && (
+                <span
+                  style={{
+                    background: '#4ade80',
+                    color: '#064e3b',
+                    fontSize: '0.72rem',
+                    fontWeight: 900,
+                    padding: '1px 6px',
+                    borderRadius: '999px',
+                  }}
+                >
+                  💡
+                </span>
+              )}
+              <ChevronUp size={18} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* MOBIL BACKDROP NÄR LEDTRÅDSPANELEN ÄR ÖPPEN (KLICK PÅ KARTAN STÄNGER PANELEN) */}
+      {isMobile && isMobileSheetExpanded && (
+        <div
+          onClick={() => setIsMobileSheetExpanded(false)}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.3)',
+            zIndex: 1250,
+          }}
+        />
+      )}
+
+      {/* 4. FLYTANDE SIDOPANEL PÅ DESKTOP / EXPANDERBAR LEDTRÅDS-DRAWER PÅ MOBIL */}
       {isSidebarOpen ? (
         <div
           onTouchStart={handleTouchStart}
@@ -1264,17 +2408,17 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   bottom: 0,
                   left: 0,
                   right: 0,
-                  height: '78vh',
-                  maxHeight: '78vh',
-                  transform: (isSolved || isSurrendered || isMobileSheetExpanded)
-                    ? 'translateY(0)'
-                    : 'translateY(calc(78vh - 110px))',
-                  transition: 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+                  height: '80%',
+                  maxHeight: '80%',
+                  transform: isMobileSheetExpanded ? 'translateY(0)' : 'translateY(105%)',
+                  pointerEvents: isMobileSheetExpanded ? 'auto' : 'none',
+                  transition: 'transform 0.28s cubic-bezier(0.16, 1, 0.3, 1)',
                   willChange: 'transform',
                   width: '100%',
                   maxWidth: '100vw',
-                  borderRadius: '20px 20px 0 0',
-                  boxShadow: '0 -8px 32px rgba(0, 0, 0, 0.22)',
+                  borderRadius: '22px 22px 0 0',
+                  boxShadow: '0 -10px 36px rgba(0, 0, 0, 0.28)',
+                  zIndex: 1300,
                 }
               : {
                   top: '14px',
@@ -1284,132 +2428,119 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   maxWidth: 'calc(100vw - 28px)',
                   borderRadius: '16px',
                   boxShadow: '0 12px 36px rgba(0, 0, 0, 0.18)',
+                  zIndex: 1000,
                 }),
-            zIndex: 1000,
-            background: 'rgba(255, 255, 255, 0.98)',
+            background: 'rgba(255, 255, 255, 0.99)',
             backdropFilter: 'blur(16px)',
             border: '1px solid rgba(255, 255, 255, 0.8)',
             display: 'flex',
             flexDirection: 'column',
-            overflow: isMobile && !isMobileSheetExpanded ? 'visible' : 'hidden',
+            overflow: 'hidden',
           }}
         >
           {/* Mobil drag handle */}
           {isMobile && (
             <div
-              onClick={() => {
-                if (!isSolved && !isSurrendered) {
-                  setIsMobileSheetExpanded(!isMobileSheetExpanded);
-                }
-              }}
+              onClick={() => setIsMobileSheetExpanded(false)}
               style={{
                 width: '100%',
-                padding: '8px 0 3px',
+                padding: '10px 0 4px',
                 display: 'flex',
                 justifyContent: 'center',
                 cursor: 'pointer',
                 background: '#faf6ed',
               }}
             >
-              <div style={{ width: '42px', height: '4px', borderRadius: '3px', background: '#cbd5e1' }} />
+              <div style={{ width: '48px', height: '5px', borderRadius: '3px', background: '#cbd5e1' }} />
             </div>
           )}
 
-          {/* Header på overlay-panelen */}
+          {/* Header på panelen */}
           <div
             style={{
-              padding: isMobile ? '7px 12px' : '12px 16px',
+              padding: isMobile ? '10px 14px' : '12px 16px',
               borderBottom: '1px solid var(--border-color)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
               background: '#faf6ed',
-              gap: '6px',
+              gap: '8px',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-              <Compass size={isMobile ? 15 : 17} style={{ color: 'var(--accent-blue)', flexShrink: 0 }} />
-              <span style={{ fontWeight: 800, fontSize: isMobile ? '0.84rem' : '0.92rem', color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '7px', minWidth: 0 }}>
+              <Compass size={18} style={{ color: 'var(--accent-blue)', flexShrink: 0 }} />
+              <span
+                style={{
+                  fontWeight: 800,
+                  fontSize: isMobile ? '0.98rem' : '0.92rem',
+                  color: 'var(--text-primary)',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
                 {isSolved
-                  ? (isSv ? '🎉 Rätt svar!' : '🎉 Correct!')
+                  ? isSv
+                    ? '🎉 Rätt svar!'
+                    : '🎉 Correct!'
                   : isSurrendered
-                  ? (isSv ? 'Svar avslöjat' : 'Answer')
-                  : (isSv ? 'Vem är personen?' : 'Who is this person?')}
+                  ? isSv
+                    ? 'Svar avslöjat'
+                    : 'Answer'
+                  : isSv
+                  ? 'Ledtrådar & Spår'
+                  : 'Clues & Trail'}
               </span>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-              {/* Aktuell vinst eller slutpoäng integrerad direkt i headern! */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
               {!isSolved && !isSurrendered ? (
                 <div
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     gap: '4px',
-                    padding: '3px 8px',
+                    padding: '5px 10px',
                     borderRadius: '999px',
                     background: '#fff9e6',
                     border: '1.5px solid #fbbf24',
                     color: '#92400e',
                     fontWeight: 800,
-                    fontSize: isMobile ? '0.76rem' : '0.82rem',
+                    fontSize: '0.85rem',
                     boxShadow: '0 1px 3px rgba(217,119,6,0.1)',
                   }}
                   title={isSv ? 'Aktuell vinst vid rätt svar' : 'Potential score'}
                 >
-                  <Sparkles size={11} style={{ color: '#d97706' }} />
+                  <Sparkles size={13} style={{ color: '#d97706' }} />
                   <span>{currentPotentialScore} p</span>
                 </div>
               ) : isSolved ? (
-                <span className="badge badge-swedish" style={{ fontSize: '0.74rem', fontWeight: 800 }}>
+                <span className="badge badge-swedish" style={{ fontSize: '0.82rem', fontWeight: 800 }}>
                   +{score} p
                 </span>
               ) : null}
 
               {isMobile ? (
-                isMobileSheetExpanded || isSolved || isSurrendered ? (
-                  <button
-                    onClick={() => setIsMobileSheetExpanded(false)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '3px',
-                      background: '#f1f5f9',
-                      border: '1px solid #cbd5e1',
-                      color: 'var(--accent-blue)',
-                      padding: '3px 7px',
-                      borderRadius: '6px',
-                      fontSize: '0.74rem',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                    }}
-                    title={isSv ? 'Minimera till kartan (eller svep ned)' : 'Back to map (or swipe down)'}
-                  >
-                    <span>{isSv ? 'Karta' : 'Map'}</span>
-                    <ChevronDown size={14} />
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setIsMobileSheetExpanded(true)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '3px',
-                      background: '#eff6ff',
-                      border: '1px solid #bfdbfe',
-                      color: '#1d4ed8',
-                      padding: '3px 8px',
-                      borderRadius: '6px',
-                      fontSize: '0.74rem',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                    }}
-                    title={isSv ? 'Visa ledtrådar (eller svep upp)' : 'View clues (or swipe up)'}
-                  >
-                    <span>{isSv ? `Ledtrådar (${revealedClues.size}/7)` : `Clues (${revealedClues.size}/7)`}</span>
-                    <ChevronUp size={13} />
-                  </button>
-                )
+                <button
+                  onClick={() => setIsMobileSheetExpanded(false)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    minHeight: '36px',
+                    background: 'var(--accent-blue)',
+                    border: 'none',
+                    color: '#ffffff',
+                    padding: '6px 12px',
+                    borderRadius: '10px',
+                    fontSize: '0.86rem',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>{isSv ? 'Visa karta' : 'Show map'}</span>
+                  <ChevronDown size={16} />
+                </button>
               ) : (
                 <button
                   onClick={() => setIsSidebarOpen(false)}
@@ -1430,11 +2561,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             </div>
           </div>
 
-          {/* Fast sökfält ovanför scrollen så det aldrig klipper förslag eller försvinner */}
-          {!isSolved && !isSurrendered && (
+          {/* Desktop: Fast sökfält ovanför scrollen (på mobil ligger sökfältet redan dockat högst upp!) */}
+          {!isMobile && !isSolved && !isSurrendered && (
             <div
               style={{
-                padding: isMobile ? '8px 12px 6px' : '10px 16px 8px',
+                padding: '10px 16px 8px',
                 background: '#ffffff',
                 borderBottom: '1px solid var(--border-color)',
                 position: 'relative',
@@ -1461,12 +2592,10 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                     setShowSuggestions(true);
                   }}
                   onFocus={() => setShowSuggestions(true)}
-                  onTouchStart={(e) => e.stopPropagation()}
-                  onTouchMove={(e) => e.stopPropagation()}
                   placeholder={isSv ? 'Gissa vem personen är...' : 'Guess who it is...'}
                   style={{
                     width: '100%',
-                    padding: '8px 32px 8px 36px',
+                    padding: '9px 36px 9px 36px',
                     borderRadius: '8px',
                     border: '1.5px solid var(--border-focus)',
                     fontSize: '0.88rem',
@@ -1480,103 +2609,204 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                     onClick={() => setSearchQuery('')}
                     style={{
                       position: 'absolute',
-                      right: '8px',
+                      right: '4px',
                       top: '50%',
                       transform: 'translateY(-50%)',
                       background: 'none',
                       border: 'none',
                       color: 'var(--text-muted)',
-                      padding: '4px',
+                      width: '32px',
+                      height: '32px',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
-                    <X size={15} />
+                    <X size={16} />
                   </button>
                 )}
               </div>
 
-              {/* Autocomplete-dropdown: flyter uppåt över kartan när panelen är nere, nedåt när den är uppe */}
+              {/* Autocomplete-dropdown på desktop */}
               {showSuggestions && suggestions.length > 0 && (
                 <div
                   style={{
                     position: 'absolute',
-                    ...(isMobile && !isMobileSheetExpanded
-                      ? { bottom: 'calc(100% + 6px)' }
-                      : { top: 'calc(100% + 4px)' }),
-                    left: isMobile ? '12px' : '16px',
-                    right: isMobile ? '12px' : '16px',
+                    top: 'calc(100% + 4px)',
+                    left: '16px',
+                    right: '16px',
                     background: '#ffffff',
                     borderRadius: '12px',
                     border: '2px solid var(--accent-blue)',
-                    boxShadow: isMobile && !isMobileSheetExpanded
-                      ? '0 -10px 32px rgba(0, 0, 0, 0.35)'
-                      : '0 12px 32px rgba(0, 0, 0, 0.28)',
+                    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.28)',
                     zIndex: 9999,
-                    maxHeight: isMobile ? '200px' : '230px',
+                    maxHeight: '230px',
                     overflowY: 'auto',
                   }}
                 >
                   {suggestions.map((p) => {
-                    const pName = p.name[lang] || p.name.sv || p.name.en || 'Okänd';
-                    const pOcc = p.occupations[0]
-                      ? p.occupations[0].name[lang] || p.occupations[0].name.sv || p.occupations[0].name.en
-                      : null;
+                    const pName = loc(p.name, lang, isSv ? 'Okänd' : 'Unknown');
+                    const alreadyGuessed = wrongGuesses.some((wg) => wg.id === p.id);
                     return (
                       <div
                         key={p.id}
-                        onClick={() => handleSelectGuess(p)}
+                        onClick={() => {
+                          if (!alreadyGuessed) handleSelectGuess(p);
+                        }}
                         style={{
-                          padding: '10px 12px',
+                          padding: '11px 12px',
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'space-between',
                           borderBottom: '1px solid #f1f5f9',
-                          cursor: 'pointer',
-                          background: '#ffffff',
+                          cursor: alreadyGuessed ? 'not-allowed' : 'pointer',
+                          background: alreadyGuessed ? '#f8fafc' : '#ffffff',
+                          opacity: alreadyGuessed ? 0.6 : 1,
                         }}
-                        onMouseEnter={(e) => (e.currentTarget.style.background = '#eff6ff')}
-                        onMouseLeave={(e) => (e.currentTarget.style.background = '#ffffff')}
+                        onMouseEnter={(e) => {
+                          if (!alreadyGuessed) e.currentTarget.style.background = '#eff6ff';
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!alreadyGuessed) e.currentTarget.style.background = '#ffffff';
+                        }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0 }}>
-                          <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>👤</span>
+                          <span style={{ fontSize: '1.05rem', flexShrink: 0 }}>{alreadyGuessed ? '👻' : '👤'}</span>
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontWeight: 800, fontSize: '0.9rem', color: '#0f172a' }}>{pName}</div>
-                            {pOcc && (
-                              <div style={{ fontSize: '0.76rem', color: '#2563eb', fontWeight: 600 }}>
-                                {pOcc}
-                              </div>
-                            )}
                           </div>
                         </div>
-                        <span style={{ fontSize: '0.74rem', color: '#94a3b8', fontWeight: 700, flexShrink: 0 }}>
-                          {p.birthDate.year}
-                        </span>
+                        {alreadyGuessed ? (
+                          <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontWeight: 700, flexShrink: 0 }}>
+                            {isSv ? 'Redan gissad' : 'Already guessed'}
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: '0.72rem', color: 'var(--accent-blue)', fontWeight: 700, flexShrink: 0 }}>
+                            {isSv ? 'Gissa (-100 p)' : 'Guess (-100 p)'}
+                          </span>
+                        )}
                       </div>
                     );
                   })}
                 </div>
               )}
 
-              {/* Felgissningar som små chips direkt under sökfältet */}
-              {wrongGuesses.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
-                  {wrongGuesses.map((wg, idx) => (
-                    <span
-                      key={idx}
+              {/* Spårjakten i fast header på desktop */}
+              {guessFeedbacks.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginTop: '7px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                    <span style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+                      {isSv ? `Dina gissningar (${guessFeedbacks.length}):` : `Your guesses (${guessFeedbacks.length}):`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowGhostPins((v) => !v)}
                       style={{
-                        background: '#fdeded',
-                        color: '#c62828',
-                        padding: '2px 7px',
-                        borderRadius: '4px',
-                        fontSize: '0.72rem',
-                        fontWeight: 600,
+                        background: showGhostPins ? '#f1f5f9' : '#fff',
+                        border: '1px solid #cbd5e1',
+                        color: showGhostPins ? '#334155' : '#94a3b8',
+                        borderRadius: '999px',
+                        padding: '2px 8px',
+                        fontSize: '0.68rem',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
                       }}
                     >
-                      ✕ {wg}
-                    </span>
-                  ))}
+                      <span>👻</span>
+                      <span>
+                        {showGhostPins
+                          ? isSv
+                            ? 'Kartnålar: På'
+                            : 'Map pins: On'
+                          : isSv
+                          ? 'Kartnålar: Av'
+                          : 'Map pins: Off'}
+                      </span>
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', maxHeight: '145px', overflowY: 'auto' }}>
+                    {guessFeedbacks.map((fb) => (
+                      <div
+                        key={fb.guessed.id}
+                        onClick={() => focusPersonOnMap(fb.guessed)}
+                        title={isSv ? 'Klicka för att visa på kartan' : 'Click to pan to person on map'}
+                        style={{
+                          background: '#fff',
+                          border: '1px solid #e2e8f0',
+                          borderLeft: fb.positiveBadges.length > 0 ? '3.5px solid #16a34a' : '3.5px solid #ef4444',
+                          borderRadius: '8px',
+                          padding: '5px 8px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '3px',
+                          cursor: 'pointer',
+                          boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
+                            <span style={{ color: '#dc2626', fontWeight: 800, fontSize: '0.75rem' }}>✕</span>
+                            <span style={{ fontWeight: 800, fontSize: '0.8rem', color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {fb.name}
+                            </span>
+                            <span style={{ fontSize: '0.71rem', color: '#64748b', fontWeight: 600, flexShrink: 0 }}>
+                              ({fb.lifespanText})
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '0.68rem', color: '#475569', fontWeight: 700, flexShrink: 0 }}>
+                            {fb.eraText}
+                          </span>
+                        </div>
+
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', alignItems: 'center' }}>
+                          {fb.positiveBadges.length > 0 ? (
+                            fb.positiveBadges.map((badge, bIdx) => (
+                              <span
+                                key={bIdx}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  background: '#dcfce7',
+                                  color: '#166534',
+                                  border: '1px solid #86efac',
+                                  padding: '1px 6px',
+                                  borderRadius: '999px',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                }}
+                              >
+                                <span>{badge.icon}</span>
+                                <span>{badge.label}</span>
+                              </span>
+                            ))
+                          ) : (
+                            <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontStyle: 'italic' }}>
+                              {isSv ? 'Ingen träff på kategori, yrke eller ort' : 'No match on category, occupation, or place'}
+                            </span>
+                          )}
+                          {fb.birthDistanceKm !== null && !fb.sameBirthPlace && (
+                            <span
+                              style={{
+                                marginLeft: 'auto',
+                                fontSize: '0.67rem',
+                                color: '#64748b',
+                                fontWeight: 600,
+                                flexShrink: 0,
+                              }}
+                            >
+                              📍 {fb.birthDistanceKm} km {isSv ? 'bort' : 'away'}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -1586,16 +2816,131 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
           <div
             ref={sheetScrollRef}
             style={{
-              padding: isMobile ? '10px 14px 20px' : '14px 16px',
+              padding: isMobile ? '14px 16px calc(28px + env(safe-area-inset-bottom, 0px))' : '14px 16px',
               overflowY: 'auto',
               overscrollBehavior: 'contain',
               WebkitOverflowScrolling: 'touch',
               flex: 1,
               display: 'flex',
               flexDirection: 'column',
-              gap: isMobile ? '9px' : '12px',
+              gap: '12px',
             }}
           >
+            {/* På mobil i expanderat läge: Visa alla gissningar med stor, tydlig typografi */}
+            {isMobile && !isSolved && !isSurrendered && guessFeedbacks.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', paddingBottom: '10px', borderBottom: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+                    {isSv ? `Dina gissningar (${guessFeedbacks.length}):` : `Your guesses (${guessFeedbacks.length}):`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowGhostPins((v) => !v)}
+                    style={{
+                      background: showGhostPins ? '#f1f5f9' : '#fff',
+                      border: '1px solid #cbd5e1',
+                      color: showGhostPins ? '#334155' : '#94a3b8',
+                      borderRadius: '999px',
+                      padding: '4px 10px',
+                      fontSize: '0.78rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                    }}
+                  >
+                    <span>👻</span>
+                    <span>
+                      {showGhostPins
+                        ? isSv
+                          ? 'Kartnålar: På'
+                          : 'Map pins: On'
+                        : isSv
+                        ? 'Kartnålar: Av'
+                        : 'Map pins: Off'}
+                    </span>
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                  {guessFeedbacks.map((fb) => (
+                    <div
+                      key={fb.guessed.id}
+                      onClick={() => focusPersonOnMap(fb.guessed)}
+                      style={{
+                        background: '#fff',
+                        border: '1px solid #cbd5e1',
+                        borderLeft: fb.positiveBadges.length > 0 ? '4px solid #16a34a' : '4px solid #ef4444',
+                        borderRadius: '10px',
+                        padding: '9px 12px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '5px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                          <span style={{ color: '#dc2626', fontWeight: 800, fontSize: '0.84rem' }}>✕</span>
+                          <span style={{ fontWeight: 800, fontSize: '0.92rem', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {fb.name}
+                          </span>
+                          <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600, flexShrink: 0 }}>
+                            ({fb.lifespanText})
+                          </span>
+                        </div>
+                        <span style={{ fontSize: '0.78rem', color: '#334155', fontWeight: 800, flexShrink: 0 }}>
+                          {fb.eraText}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', alignItems: 'center' }}>
+                        {fb.positiveBadges.length > 0 ? (
+                          fb.positiveBadges.map((badge, bIdx) => (
+                            <span
+                              key={bIdx}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                background: '#dcfce7',
+                                color: '#166534',
+                                border: '1px solid #86efac',
+                                padding: '2px 8px',
+                                borderRadius: '999px',
+                                fontSize: '0.78rem',
+                                fontWeight: 800,
+                              }}
+                            >
+                              <span>{badge.icon}</span>
+                              <span>{badge.label}</span>
+                            </span>
+                          ))
+                        ) : (
+                          <span style={{ fontSize: '0.78rem', color: '#64748b', fontStyle: 'italic' }}>
+                            {isSv ? 'Ingen träff på kategori, yrke eller ort' : 'No match on category, occupation, or place'}
+                          </span>
+                        )}
+                        {fb.birthDistanceKm !== null && !fb.sameBirthPlace && (
+                          <span
+                            style={{
+                              marginLeft: 'auto',
+                              fontSize: '0.76rem',
+                              color: '#475569',
+                              fontWeight: 700,
+                            }}
+                          >
+                            📍 {fb.birthDistanceKm} km {isSv ? 'bort' : 'away'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Match-framstegsbanner (när en match pågår) */}
             {isMatchActive && (
               <div
@@ -1612,11 +2957,10 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <Trophy size={15} style={{ color: '#fbbf24' }} />
-                  <span style={{ fontWeight: 800, fontSize: '0.82rem' }}>
+                  <span style={{ fontWeight: 800, fontSize: '0.86rem' }}>
                     {isSv ? `Rond ${currentRoundIndex + 1} av 5` : `Round ${currentRoundIndex + 1} of 5`}
                   </span>
                 </div>
-                {/* 5 steg-prickar */}
                 <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
                   {[0, 1, 2, 3, 4].map((idx) => {
                     const res = matchResults[idx];
@@ -1643,7 +2987,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                     );
                   })}
                 </div>
-                <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fef08a' }}>
+                <div style={{ fontSize: '0.84rem', fontWeight: 800, color: '#fef08a' }}>
                   {matchResults.reduce((sum, r) => sum + r.score, 0)} p
                 </div>
               </div>
@@ -1656,20 +3000,20 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   background: isSolved ? '#edf7ed' : '#fdeded',
                   border: `1.5px solid ${isSolved ? '#4caf50' : '#ef5350'}`,
                   borderRadius: '12px',
-                  padding: '12px',
+                  padding: '14px',
                   display: 'flex',
                   flexDirection: 'column',
                   gap: '10px',
                 }}
               >
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                   {currentPerson.image?.thumb && (
                     <img
                       src={currentPerson.image.thumb}
                       alt={name}
                       style={{
-                        width: '54px',
-                        height: '54px',
+                        width: '58px',
+                        height: '58px',
                         borderRadius: '50%',
                         objectFit: 'cover',
                         border: `2px solid ${isSolved ? '#4caf50' : '#ef5350'}`,
@@ -1679,20 +3023,20 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       {isSolved ? (
-                        <CheckCircle2 size={18} style={{ color: '#2e7d32' }} />
+                        <CheckCircle2 size={20} style={{ color: '#2e7d32' }} />
                       ) : (
-                        <XCircle size={18} style={{ color: '#c62828' }} />
+                        <XCircle size={20} style={{ color: '#c62828' }} />
                       )}
-                      <strong style={{ fontSize: '1.1rem' }}>{name}</strong>
+                      <strong style={{ fontSize: '1.15rem' }}>{name}</strong>
                     </div>
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                    <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
                       {birthYear} – {deathYear || (isSv ? 'nu' : 'now')}
                     </div>
                   </div>
                 </div>
 
                 {desc && (
-                  <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.35, fontStyle: 'italic' }}>
+                  <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: 1.4, fontStyle: 'italic' }}>
                     "{desc}"
                   </p>
                 )}
@@ -1701,31 +3045,35 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   <div
                     style={{
                       background: '#fff',
-                      padding: '9px 11px',
-                      borderRadius: '8px',
+                      padding: '10px 12px',
+                      borderRadius: '10px',
                       border: '1px solid var(--border-color)',
-                      fontSize: '0.8rem',
-                      lineHeight: 1.45,
+                      fontSize: '0.88rem',
+                      lineHeight: 1.5,
                       color: 'var(--text-primary)',
                     }}
                   >
                     <p>{wikiSummary}</p>
                     {wikiUrl && (
-                      <div style={{ marginTop: '5px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                        Källa: <a href={wikiUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-blue)', textDecoration: 'underline' }}>Wikipedia</a> (CC BY-SA 4.0)
+                      <div style={{ marginTop: '6px', fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                        {isSv ? 'Källa:' : 'Source:'}{' '}
+                        <a href={wikiUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-blue)', textDecoration: 'underline' }}>
+                          Wikipedia
+                        </a>{' '}
+                        (CC BY-SA 4.0)
                       </div>
                     )}
                   </div>
                 )}
 
                 {isSolved ? (
-                  <div style={{ fontSize: '0.82rem', color: '#2e7d32', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <div style={{ fontWeight: 800, fontSize: '0.88rem' }}>
+                  <div style={{ fontSize: '0.88rem', color: '#2e7d32', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <div style={{ fontWeight: 800, fontSize: '0.94rem' }}>
                       🎉 {isSv ? `Rätt svar! Du fick +${score} poäng!` : `Correct! +${score} points!`}
                     </div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
                       {(() => {
-                        const base = currentPerson.tier === 'reference' ? 1200 : 1000;
+                        const base = getBasePoints(currentPerson.tier);
                         const cCost = deductionsAtEnd?.cluesCost ?? 0;
                         const wCost = deductionsAtEnd?.wrongCost ?? 0;
                         if (cCost === 0 && wCost === 0) {
@@ -1733,39 +3081,39 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                             ? `Full pott! Inga ledtrådar använda (${base} p)`
                             : `Full score! No clues or wrong guesses used (${base} p)`;
                         }
-                        const parts = [`Bas: ${base} p`];
-                        if (cCost > 0) parts.push(`Ledtrådar: -${cCost} p`);
-                        if (wCost > 0) parts.push(`Felgissningar: -${wCost} p`);
+                        const parts = [isSv ? `Bas: ${base} p` : `Base: ${base} p`];
+                        if (cCost > 0) parts.push(isSv ? `Ledtrådar: -${cCost} p` : `Clues: -${cCost} p`);
+                        if (wCost > 0) parts.push(isSv ? `Felgissningar: -${wCost} p` : `Wrong guesses: -${wCost} p`);
                         return parts.join(' · ');
                       })()}
                     </div>
                   </div>
                 ) : (
-                  <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#c62828' }}>
+                  <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#c62828' }}>
                     {isSv ? 'Du gav upp gåtan (0 poäng).' : 'You surrendered (0 points).'}
                   </div>
                 )}
 
-                <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
                   {onInspectPerson && (
                     <button
                       onClick={() => onInspectPerson(currentPerson)}
                       style={{
                         flex: 1,
-                        padding: '7px',
-                        borderRadius: '6px',
+                        padding: '9px',
+                        borderRadius: '8px',
                         border: '1px solid var(--border-focus)',
                         background: '#fff',
-                        fontSize: '0.78rem',
+                        fontSize: '0.85rem',
                         fontWeight: 700,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: '4px',
+                        gap: '5px',
                         cursor: 'pointer',
                       }}
                     >
-                      <Eye size={13} />
+                      <Eye size={15} />
                       {isSv ? 'Inspektera' : 'Inspect'}
                     </button>
                   )}
@@ -1775,43 +3123,43 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                         onClick={handleNextMatchRound}
                         style={{
                           flex: 1.4,
-                          padding: '7px',
-                          borderRadius: '6px',
+                          padding: '9px',
+                          borderRadius: '8px',
                           border: 'none',
                           background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
                           color: '#fff',
-                          fontSize: '0.78rem',
+                          fontSize: '0.85rem',
                           fontWeight: 800,
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
-                          gap: '4px',
+                          gap: '5px',
                           cursor: 'pointer',
                         }}
                       >
                         {isSv ? `Nästa rond (${currentRoundIndex + 2}/5)` : `Next round (${currentRoundIndex + 2}/5)`}
-                        <ArrowRight size={13} />
+                        <ArrowRight size={15} />
                       </button>
                     ) : (
                       <button
                         onClick={() => setIsMatchSummaryOpen(true)}
                         style={{
                           flex: 1.4,
-                          padding: '7px',
-                          borderRadius: '6px',
+                          padding: '9px',
+                          borderRadius: '8px',
                           border: 'none',
                           background: 'linear-gradient(135deg, #b45309, #d97706)',
                           color: '#fff',
-                          fontSize: '0.78rem',
+                          fontSize: '0.85rem',
                           fontWeight: 800,
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
-                          gap: '4px',
+                          gap: '5px',
                           cursor: 'pointer',
                         }}
                       >
-                        <Trophy size={13} />
+                        <Trophy size={15} />
                         {isSv ? 'Se matchresultat 🏆' : 'Match summary 🏆'}
                       </button>
                     )
@@ -1820,767 +3168,201 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                       onClick={() => handleNextPerson()}
                       style={{
                         flex: 1,
-                        padding: '7px',
-                        borderRadius: '6px',
+                        padding: '9px',
+                        borderRadius: '8px',
                         border: 'none',
                         background: 'var(--accent-blue)',
                         color: '#fff',
-                        fontSize: '0.78rem',
+                        fontSize: '0.85rem',
                         fontWeight: 800,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: '4px',
+                        gap: '5px',
                         cursor: 'pointer',
                       }}
                     >
                       {isSv ? 'Nästa gåta' : 'Next'}
-                      <ArrowRight size={13} />
+                      <ArrowRight size={15} />
                     </button>
                   )}
                 </div>
               </div>
             )}
 
-            {/* C. Ledtrådar (Alltid i DOM för naturlig rullning på mobil & desktop) */}
+            {/* C. Ledtrådar: Balanserad 6-stegsstege */}
             <div style={{ marginTop: '2px', position: 'relative', zIndex: 1 }}>
               <div
                 style={{
-                  fontSize: '0.76rem',
+                  fontSize: '0.82rem',
                   fontWeight: 800,
                   color: 'var(--text-muted)',
                   textTransform: 'uppercase',
                   letterSpacing: '0.04em',
-                  marginBottom: '6px',
+                  marginBottom: '8px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                  <Sparkles size={13} style={{ color: 'var(--accent-gold)' }} />
-                  <span>{isSv ? `Ledtrådar (${revealedClues.size}/7):` : `Clues (${revealedClues.size}/7):`}</span>
+                  <Sparkles size={14} style={{ color: 'var(--accent-gold)' }} />
+                  <span>
+                    {isSv
+                      ? `Ledtrådar (${purchasedClues.size}/${availableClues.length}):`
+                      : `Clues (${purchasedClues.size}/${availableClues.length}):`}
+                  </span>
                 </div>
-                {isMobile && !isMobileSheetExpanded ? (
-                  <button
-                    onClick={() => setIsMobileSheetExpanded(true)}
-                    style={{
-                      background: '#eff6ff',
-                      border: '1px solid #bfdbfe',
-                      color: '#1d4ed8',
-                      padding: '2px 9px',
-                      borderRadius: '999px',
-                      fontSize: '0.72rem',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '3px',
-                    }}
-                  >
-                    <span>{isSv ? 'Visa ledtrådar' : 'View clues'}</span>
-                    <ChevronUp size={12} />
-                  </button>
-                ) : !isSolved && !isSurrendered ? (
-                  <span style={{ fontSize: '0.72rem', color: '#855700', fontWeight: 700 }}>
+                {!isSolved && !isSurrendered && (
+                  <span style={{ fontSize: '0.78rem', color: '#855700', fontWeight: 700, textTransform: 'none' }}>
                     {isSv ? 'Klicka på ett kort för att avslöja' : 'Tap card to reveal'}
                   </span>
-                ) : null}
+                )}
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {/* 0. Biografisk berättelse från Wikipedia */}
-                <div
-                  onClick={() => toggleClue('wikiSummary')}
-                  style={{
-                    border: revealedClues.has('wikiSummary') ? '2px solid #3b82f6' : '1.5px solid #e2e8f0',
-                    borderRadius: '12px',
-                    padding: '11px 13px',
-                    background: revealedClues.has('wikiSummary') ? '#ffffff' : '#f8fafc',
-                    boxShadow: revealedClues.has('wikiSummary') ? '0 4px 12px rgba(59, 130, 246, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                    minHeight: '52px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                  }}
+                {/* 1. Profil: Kategori, Kön & Land (-75 p) */}
+                <ClueCard
+                  title={isSv ? 'Profil: Kategori, Kön & Land' : 'Profile: Category, Gender & Country'}
+                  subtitle={isSv ? 'Område, kön och nationalitet' : 'Domain, gender and nationality'}
+                  cost={CLUE_COSTS.profile}
+                  isPurchased={purchasedClues.has('profile') || freeClues.has('profile')}
+                  freeLabel={
+                    freeClues.has('profile')
+                      ? isSv
+                        ? 'Gratis – nu levande person'
+                        : 'Free – person is alive'
+                      : null
+                  }
+                  isExpanded={expandedClues.has('profile')}
+                  isRoundEnded={isSolved || isSurrendered}
+                  isSv={isSv}
+                  borderColor="#0891b2"
+                  shadowColor="rgba(8, 145, 178, 0.08)"
+                  iconBg="#ecfeff"
+                  icon={<UserCheck size={18} style={{ color: '#0891b2' }} />}
+                  hintBadge={deducedProfileHint}
+                  onToggle={() => toggleClue('profile')}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                      <div
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '7px' }}>
+                    {(currentPerson.categories && currentPerson.categories.length > 0
+                      ? currentPerson.categories
+                      : (['other'] as const)
+                    ).map((cat) => {
+                      const info = QUIZ_CATEGORIES[cat] || QUIZ_CATEGORIES.other;
+                      return (
+                        <span
+                          key={cat}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            padding: '5px 11px',
+                            borderRadius: '999px',
+                            background: '#ecfeff',
+                            color: '#0e7490',
+                            fontWeight: 800,
+                            fontSize: '0.88rem',
+                            border: '1.5px solid #a5f3fc',
+                          }}
+                        >
+                          <span>{info.icon}</span>
+                          <span>{info[lang] || info.sv}</span>
+                        </span>
+                      );
+                    })}
+
+                    {currentPerson.gender && (
+                      <span
                         style={{
-                          width: '36px',
-                          height: '36px',
-                          borderRadius: '10px',
-                          background: '#eff6ff',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
+                          background: '#f5f3ff',
+                          color: '#6d28d9',
+                          border: '1px solid #ddd6fe',
+                          padding: '5px 11px',
+                          borderRadius: '999px',
+                          fontSize: '0.88rem',
+                          fontWeight: 800,
                         }}
                       >
-                        <BookOpen size={18} style={{ color: '#2563eb' }} />
-                      </div>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                          {isSv ? 'Biografisk berättelse (Wikipedia)' : 'Biographical summary (Wikipedia)'}
-                        </div>
-                        {!revealedClues.has('wikiSummary') && (
-                          <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                            {isSv ? 'Ingress med personens historia' : 'Wikipedia intro narrative'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                        {currentPerson.gender === 'female'
+                          ? isSv
+                            ? 'Kvinna ♀'
+                            : 'Female ♀'
+                          : currentPerson.gender === 'male'
+                          ? isSv
+                            ? 'Man ♂'
+                            : 'Male ♂'
+                          : isSv
+                          ? 'Icke-binär / Annat'
+                          : 'Non-binary / Other'}
+                      </span>
+                    )}
 
-                    <div
-                      style={{
-                        padding: '7px 13px',
-                        borderRadius: '999px',
-                        fontWeight: 800,
-                        fontSize: '0.82rem',
-                        background: revealedClues.has('wikiSummary')
-                          ? '#f1f5f9'
-                          : isSolved || isSurrendered
-                          ? '#e0e7ff'
-                          : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                        color: revealedClues.has('wikiSummary')
-                          ? '#475569'
-                          : isSolved || isSurrendered
-                          ? '#3730a3'
-                          : '#ffffff',
-                        boxShadow: !revealedClues.has('wikiSummary') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                        flexShrink: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                      }}
-                    >
-                      {revealedClues.has('wikiSummary') ? (
-                        <>
-                          <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                          <ChevronUp size={14} />
-                        </>
-                      ) : isSolved || isSurrendered ? (
-                        <>
-                          <span>{isSv ? 'Visa' : 'Show'}</span>
-                          <ChevronDown size={14} />
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles size={13} style={{ color: '#fef08a' }} />
-                          <span>{isSv ? 'Avslöja (-250 p)' : 'Reveal (-250 p)'}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {revealedClues.has('wikiSummary') && (
-                    <div
-                      style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0', fontSize: '0.85rem', color: '#1e293b', lineHeight: 1.5 }}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {wikiLoading ? (
-                        <div style={{ fontStyle: 'italic', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
-                          {isSv ? 'Hämtar sammanfattning från Wikipedia...' : 'Loading summary from Wikipedia...'}
-                        </div>
-                      ) : sanitizedWikiSummary ? (
-                        <>
-                          <p style={{ margin: 0, fontStyle: 'italic' }}>"{sanitizedWikiSummary}"</p>
-                          {wikiUrl && (
-                            <div style={{ marginTop: '6px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                              {isSv ? 'Källa:' : 'Source:'}{' '}
-                              <a
-                                href={wikiUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{ color: 'var(--accent-blue)', textDecoration: 'underline', fontWeight: 600 }}
-                              >
-                                Wikipedia (CC BY-SA 4.0)
-                              </a>
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <div style={{ fontStyle: 'italic', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
-                          {isSv ? 'Kunde inte hämta sammanfattning från Wikipedia för denna person.' : 'Could not fetch summary from Wikipedia.'}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* 1. Yrke */}
-                <div
-                  onClick={() => toggleClue('occupation')}
-                  style={{
-                    border: revealedClues.has('occupation') ? '2px solid #16a34a' : '1.5px solid #e2e8f0',
-                    borderRadius: '12px',
-                    padding: '11px 13px',
-                    background: revealedClues.has('occupation') ? '#ffffff' : '#f8fafc',
-                    boxShadow: revealedClues.has('occupation') ? '0 4px 12px rgba(22, 163, 74, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                    minHeight: '52px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                      <div
+                    {citizenship.map((cit, i) => (
+                      <span
+                        key={i}
                         style={{
-                          width: '36px',
-                          height: '36px',
-                          borderRadius: '10px',
-                          background: '#f0fdf4',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
+                          background: '#fef2f2',
+                          color: '#991b1b',
+                          border: '1px solid #fecaca',
+                          padding: '5px 11px',
+                          borderRadius: '999px',
+                          fontSize: '0.88rem',
+                          fontWeight: 700,
                         }}
                       >
-                        <Briefcase size={18} style={{ color: '#16a34a' }} />
-                      </div>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                          {isSv ? 'Yrke & Verksamhet' : 'Occupation'}
-                        </div>
-                        {!revealedClues.has('occupation') && (
-                          <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                            {isSv ? 'Vad personen arbetade med' : 'Professional activities'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        padding: '7px 13px',
-                        borderRadius: '999px',
-                        fontWeight: 800,
-                        fontSize: '0.82rem',
-                        background: revealedClues.has('occupation')
-                          ? '#f1f5f9'
-                          : isSolved || isSurrendered
-                          ? '#e0e7ff'
-                          : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                        color: revealedClues.has('occupation')
-                          ? '#475569'
-                          : isSolved || isSurrendered
-                          ? '#3730a3'
-                          : '#ffffff',
-                        boxShadow: !revealedClues.has('occupation') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                        flexShrink: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                      }}
-                    >
-                      {revealedClues.has('occupation') ? (
-                        <>
-                          <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                          <ChevronUp size={14} />
-                        </>
-                      ) : isSolved || isSurrendered ? (
-                        <>
-                          <span>{isSv ? 'Visa' : 'Show'}</span>
-                          <ChevronDown size={14} />
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles size={13} style={{ color: '#fef08a' }} />
-                          <span>{isSv ? 'Avslöja (-150 p)' : 'Reveal (-150 p)'}</span>
-                        </>
-                      )}
-                    </div>
+                        🌍 {cit}
+                      </span>
+                    ))}
                   </div>
+                </ClueCard>
 
-                  {revealedClues.has('occupation') && (
-                    <div
-                      style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0' }}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                        {occupations.length > 0 ? (
-                          occupations.map((occ, i) => (
+                {/* 2. Yrke & Roll (-150 p, kombinerar yrken + kort Wikidata-beskrivning) */}
+                {availableClues.includes('occupation') && (
+                  <ClueCard
+                    title={isSv ? 'Yrke & Roll' : 'Occupation & Role'}
+                    subtitle={isSv ? 'Verksamhet och kort beskrivning' : 'Profession and short description'}
+                    cost={CLUE_COSTS.occupation}
+                    isPurchased={purchasedClues.has('occupation')}
+                    isExpanded={expandedClues.has('occupation')}
+                    isRoundEnded={isSolved || isSurrendered}
+                    isSv={isSv}
+                    borderColor="#16a34a"
+                    shadowColor="rgba(22, 163, 74, 0.08)"
+                    iconBg="#f0fdf4"
+                    icon={<Briefcase size={18} style={{ color: '#16a34a' }} />}
+                    hintBadge={deducedOccupationHint}
+                    onToggle={() => toggleClue('occupation')}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {occupations.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {occupations.map((occ, i) => (
                             <span
                               key={i}
                               style={{
                                 background: '#f0fdf4',
                                 color: '#166534',
                                 border: '1px solid #bbf7d0',
-                                padding: '4px 10px',
-                                borderRadius: '6px',
-                                fontSize: '0.82rem',
+                                padding: '5px 11px',
+                                borderRadius: '8px',
+                                fontSize: '0.88rem',
                                 fontWeight: 700,
                               }}
                             >
                               {occ}
                             </span>
-                          ))
-                        ) : (
-                          <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                            {isSv ? 'Inga specifika yrken listade' : 'None listed'}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* 2. Land / Medborgarskap */}
-                <div
-                  onClick={() => toggleClue('citizenship')}
-                  style={{
-                    border: revealedClues.has('citizenship') ? '2px solid #dc2626' : '1.5px solid #e2e8f0',
-                    borderRadius: '12px',
-                    padding: '11px 13px',
-                    background: revealedClues.has('citizenship') ? '#ffffff' : '#f8fafc',
-                    boxShadow: revealedClues.has('citizenship') ? '0 4px 12px rgba(220, 38, 38, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                    minHeight: '52px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                      <div
-                        style={{
-                          width: '36px',
-                          height: '36px',
-                          borderRadius: '10px',
-                          background: '#fef2f2',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                        }}
-                      >
-                        <Flag size={18} style={{ color: '#dc2626' }} />
-                      </div>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                          {isSv ? 'Land & Medborgarskap' : 'Citizenship'}
-                        </div>
-                        {!revealedClues.has('citizenship') && (
-                          <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                            {isSv ? 'Nationalitet och hemländer' : 'National identity'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        padding: '7px 13px',
-                        borderRadius: '999px',
-                        fontWeight: 800,
-                        fontSize: '0.82rem',
-                        background: revealedClues.has('citizenship')
-                          ? '#f1f5f9'
-                          : isSolved || isSurrendered
-                          ? '#e0e7ff'
-                          : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                        color: revealedClues.has('citizenship')
-                          ? '#475569'
-                          : isSolved || isSurrendered
-                          ? '#3730a3'
-                          : '#ffffff',
-                        boxShadow: !revealedClues.has('citizenship') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                        flexShrink: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                      }}
-                    >
-                      {revealedClues.has('citizenship') ? (
-                        <>
-                          <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                          <ChevronUp size={14} />
-                        </>
-                      ) : isSolved || isSurrendered ? (
-                        <>
-                          <span>{isSv ? 'Visa' : 'Show'}</span>
-                          <ChevronDown size={14} />
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles size={13} style={{ color: '#fef08a' }} />
-                          <span>{isSv ? 'Avslöja (-100 p)' : 'Reveal (-100 p)'}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {revealedClues.has('citizenship') && (
-                    <div
-                      style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0' }}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                        {citizenship.length > 0 ? (
-                          citizenship.map((cit, i) => (
-                            <span
-                              key={i}
-                              style={{
-                                background: '#fef2f2',
-                                color: '#991b1b',
-                                border: '1px solid #fecaca',
-                                padding: '4px 10px',
-                                borderRadius: '6px',
-                                fontSize: '0.82rem',
-                                fontWeight: 700,
-                              }}
-                            >
-                              {cit}
-                            </span>
-                          ))
-                        ) : (
-                          <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                            {isSv ? 'Information saknas' : 'Not listed'}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* 3. Kön (-50 p) */}
-                <div
-                  onClick={() => toggleClue('gender')}
-                  style={{
-                    border: revealedClues.has('gender') ? '2px solid #7c3aed' : '1.5px solid #e2e8f0',
-                    borderRadius: '12px',
-                    padding: '11px 13px',
-                    background: revealedClues.has('gender') ? '#ffffff' : '#f8fafc',
-                    boxShadow: revealedClues.has('gender') ? '0 4px 12px rgba(124, 58, 237, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                    minHeight: '52px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                      <div
-                        style={{
-                          width: '36px',
-                          height: '36px',
-                          borderRadius: '10px',
-                          background: '#f5f3ff',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                        }}
-                      >
-                        <UserCheck size={18} style={{ color: '#7c3aed' }} />
-                      </div>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                          {isSv ? 'Kön' : 'Gender'}
-                        </div>
-                        {!revealedClues.has('gender') && (
-                          <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                            {isSv ? 'Kvinna, man eller annat' : 'Gender identity'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        padding: '7px 13px',
-                        borderRadius: '999px',
-                        fontWeight: 800,
-                        fontSize: '0.82rem',
-                        background: revealedClues.has('gender')
-                          ? '#f1f5f9'
-                          : isSolved || isSurrendered
-                          ? '#e0e7ff'
-                          : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                        color: revealedClues.has('gender')
-                          ? '#475569'
-                          : isSolved || isSurrendered
-                          ? '#3730a3'
-                          : '#ffffff',
-                        boxShadow: !revealedClues.has('gender') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                        flexShrink: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                      }}
-                    >
-                      {revealedClues.has('gender') ? (
-                        <>
-                          <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                          <ChevronUp size={14} />
-                        </>
-                      ) : isSolved || isSurrendered ? (
-                        <>
-                          <span>{isSv ? 'Visa' : 'Show'}</span>
-                          <ChevronDown size={14} />
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles size={13} style={{ color: '#fef08a' }} />
-                          <span>{isSv ? 'Avslöja (-50 p)' : 'Reveal (-50 p)'}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {revealedClues.has('gender') && (
-                    <div
-                      style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0' }}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <span
-                        style={{
-                          background: '#f5f3ff',
-                          color: '#6d28d9',
-                          border: '1px solid #ddd6fe',
-                          padding: '4px 12px',
-                          borderRadius: '6px',
-                          fontSize: '0.84rem',
-                          fontWeight: 800,
-                          display: 'inline-block',
-                        }}
-                      >
-                        {currentPerson.gender === 'female'
-                          ? (isSv ? 'Kvinna ♀' : 'Female ♀')
-                          : currentPerson.gender === 'male'
-                          ? (isSv ? 'Man ♂' : 'Male ♂')
-                          : (isSv ? 'Icke-binär / Annat' : 'Non-binary / Other')}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {/* 4. Kända verk */}
-                {works.length > 0 && (
-                  <div
-                    onClick={() => toggleClue('works')}
-                    style={{
-                      border: revealedClues.has('works') ? '2px solid #d97706' : '1.5px solid #e2e8f0',
-                      borderRadius: '12px',
-                      padding: '11px 13px',
-                      background: revealedClues.has('works') ? '#ffffff' : '#f8fafc',
-                      boxShadow: revealedClues.has('works') ? '0 4px 12px rgba(217, 119, 6, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                      minHeight: '52px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                        <div
-                          style={{
-                            width: '36px',
-                            height: '36px',
-                            borderRadius: '10px',
-                            background: '#fffbeb',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            flexShrink: 0,
-                          }}
-                        >
-                          <Award size={18} style={{ color: '#d97706' }} />
-                        </div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                            {isSv ? 'Kända verk & Skapelser' : 'Notable Works'}
-                          </div>
-                          {!revealedClues.has('works') && (
-                            <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                              {isSv ? 'Böcker, tavlor, uppfinningar m.m.' : 'Major works and creations'}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div
-                        style={{
-                          padding: '7px 13px',
-                          borderRadius: '999px',
-                          fontWeight: 800,
-                          fontSize: '0.82rem',
-                          background: revealedClues.has('works')
-                            ? '#f1f5f9'
-                            : isSolved || isSurrendered
-                            ? '#e0e7ff'
-                            : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                          color: revealedClues.has('works')
-                            ? '#475569'
-                            : isSolved || isSurrendered
-                            ? '#3730a3'
-                            : '#ffffff',
-                          boxShadow: !revealedClues.has('works') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                          flexShrink: 0,
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                        }}
-                      >
-                        {revealedClues.has('works') ? (
-                          <>
-                            <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                            <ChevronUp size={14} />
-                          </>
-                        ) : isSolved || isSurrendered ? (
-                          <>
-                            <span>{isSv ? 'Visa' : 'Show'}</span>
-                            <ChevronDown size={14} />
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={13} style={{ color: '#fef08a' }} />
-                            <span>{isSv ? 'Avslöja (-250 p)' : 'Reveal (-250 p)'}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {revealedClues.has('works') && (
-                      <div
-                        style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0' }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                          {works.map((w, i) => (
-                            <span
-                              key={i}
-                              style={{
-                                background: '#fffbeb',
-                                color: '#92400e',
-                                border: '1px solid #fde68a',
-                                padding: '4px 10px',
-                                borderRadius: '6px',
-                                fontSize: '0.82rem',
-                                fontWeight: 700,
-                              }}
-                            >
-                              {w}
-                            </span>
                           ))}
                         </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 5. Beskrivning */}
-                {desc && (
-                  <div
-                    onClick={() => toggleClue('description')}
-                    style={{
-                      border: revealedClues.has('description') ? '2px solid #0284c7' : '1.5px solid #e2e8f0',
-                      borderRadius: '12px',
-                      padding: '11px 13px',
-                      background: revealedClues.has('description') ? '#ffffff' : '#f8fafc',
-                      boxShadow: revealedClues.has('description') ? '0 4px 12px rgba(2, 132, 199, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                      minHeight: '52px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                        <div
-                          style={{
-                            width: '36px',
-                            height: '36px',
-                            borderRadius: '10px',
-                            background: '#f0f9ff',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            flexShrink: 0,
-                          }}
-                        >
-                          <BookOpen size={18} style={{ color: '#0284c7' }} />
-                        </div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                            {isSv ? 'Kort sammanfattning' : 'Short Bio'}
-                          </div>
-                          {!revealedClues.has('description') && (
-                            <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                              {isSv ? 'Wikidata-beskrivning av personen' : 'Wikidata short description'}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div
-                        style={{
-                          padding: '7px 13px',
-                          borderRadius: '999px',
-                          fontWeight: 800,
-                          fontSize: '0.82rem',
-                          background: revealedClues.has('description')
-                            ? '#f1f5f9'
-                            : isSolved || isSurrendered
-                            ? '#e0e7ff'
-                            : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                          color: revealedClues.has('description')
-                            ? '#475569'
-                            : isSolved || isSurrendered
-                            ? '#3730a3'
-                            : '#ffffff',
-                          boxShadow: !revealedClues.has('description') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                          flexShrink: 0,
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                        }}
-                      >
-                        {revealedClues.has('description') ? (
-                          <>
-                            <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                            <ChevronUp size={14} />
-                          </>
-                        ) : isSolved || isSurrendered ? (
-                          <>
-                            <span>{isSv ? 'Visa' : 'Show'}</span>
-                            <ChevronDown size={14} />
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={13} style={{ color: '#fef08a' }} />
-                            <span>{isSv ? 'Avslöja (-100 p)' : 'Reveal (-100 p)'}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {revealedClues.has('description') && (
-                      <div
-                        style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0' }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
+                      )}
+                      {desc && (
                         <div
                           style={{
                             background: '#f8fafc',
                             border: '1px solid #e2e8f0',
-                            padding: '8px 12px',
+                            padding: '9px 12px',
                             borderRadius: '8px',
-                            fontSize: '0.85rem',
+                            fontSize: '0.9rem',
                             color: '#334155',
                             fontStyle: 'italic',
                             lineHeight: 1.45,
@@ -2588,119 +3370,124 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                         >
                           "{desc}"
                         </div>
-                      </div>
-                    )}
-                  </div>
+                      )}
+                    </div>
+                  </ClueCard>
                 )}
 
-                {/* 6. Porträtt */}
-                {currentPerson.image?.thumb && (
-                  <div
-                    onClick={() => toggleClue('portrait')}
-                    style={{
-                      border: revealedClues.has('portrait') ? '2px solid #c026d3' : '1.5px solid #e2e8f0',
-                      borderRadius: '12px',
-                      padding: '11px 13px',
-                      background: revealedClues.has('portrait') ? '#ffffff' : '#f8fafc',
-                      boxShadow: revealedClues.has('portrait') ? '0 4px 12px rgba(192, 38, 211, 0.08)' : '0 1px 3px rgba(0,0,0,0.03)',
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                      minHeight: '52px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
-                    }}
+                {/* 4. Kända verk & Skapelser (-200 p) */}
+                {availableClues.includes('works') && (
+                  <ClueCard
+                    title={isSv ? 'Kända verk & Skapelser' : 'Notable Works'}
+                    subtitle={isSv ? 'Böcker, tavlor, uppfinningar m.m.' : 'Major works and creations'}
+                    cost={CLUE_COSTS.works}
+                    isPurchased={purchasedClues.has('works')}
+                    isExpanded={expandedClues.has('works')}
+                    isRoundEnded={isSolved || isSurrendered}
+                    isSv={isSv}
+                    borderColor="#d97706"
+                    shadowColor="rgba(217, 119, 6, 0.08)"
+                    iconBg="#fffbeb"
+                    icon={<Award size={18} style={{ color: '#d97706' }} />}
+                    onToggle={() => toggleClue('works')}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                        <div
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                      {works.map((w, i) => (
+                        <span
+                          key={i}
                           style={{
-                            width: '36px',
-                            height: '36px',
-                            borderRadius: '10px',
-                            background: '#fdf4ff',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            flexShrink: 0,
+                            background: '#fffbeb',
+                            color: '#92400e',
+                            border: '1px solid #fde68a',
+                            padding: '5px 11px',
+                            borderRadius: '8px',
+                            fontSize: '0.88rem',
+                            fontWeight: 700,
                           }}
                         >
-                          <Eye size={18} style={{ color: '#c026d3' }} />
-                        </div>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#1e293b' }}>
-                            {isSv ? 'Porträttbild' : 'Portrait Image'}
-                          </div>
-                          {!revealedClues.has('portrait') && (
-                            <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
-                              {isSv ? 'Historiskt foto eller målning' : 'Historical photo or artwork'}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div
-                        style={{
-                          padding: '7px 13px',
-                          borderRadius: '999px',
-                          fontWeight: 800,
-                          fontSize: '0.82rem',
-                          background: revealedClues.has('portrait')
-                            ? '#f1f5f9'
-                            : isSolved || isSurrendered
-                            ? '#e0e7ff'
-                            : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                          color: revealedClues.has('portrait')
-                            ? '#475569'
-                            : isSolved || isSurrendered
-                            ? '#3730a3'
-                            : '#ffffff',
-                          boxShadow: !revealedClues.has('portrait') && !isSolved && !isSurrendered ? '0 2px 6px rgba(37,99,235,0.25)' : 'none',
-                          flexShrink: 0,
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                        }}
-                      >
-                        {revealedClues.has('portrait') ? (
-                          <>
-                            <span>{isSv ? 'Dölj' : 'Hide'}</span>
-                            <ChevronUp size={14} />
-                          </>
-                        ) : isSolved || isSurrendered ? (
-                          <>
-                            <span>{isSv ? 'Visa' : 'Show'}</span>
-                            <ChevronDown size={14} />
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={13} style={{ color: '#fef08a' }} />
-                            <span>{isSv ? 'Avslöja (-350 p)' : 'Reveal (-350 p)'}</span>
-                          </>
-                        )}
-                      </div>
+                          {w}
+                        </span>
+                      ))}
                     </div>
+                  </ClueCard>
+                )}
 
-                    {revealedClues.has('portrait') && (
-                      <div
-                        style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #e2e8f0', textAlign: 'center' }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <img
-                          src={currentPerson.image.thumb}
-                          alt="Portrait"
-                          style={{
-                            width: '90px',
-                            height: '90px',
-                            borderRadius: '50%',
-                            objectFit: 'cover',
-                            border: '3px solid var(--accent-gold)',
-                            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                          }}
-                        />
+                {/* 5. Biografisk berättelse (Wikipedia) (-300 p) */}
+                <ClueCard
+                  title={isSv ? 'Biografisk berättelse (Wikipedia)' : 'Biographical summary (Wikipedia)'}
+                  subtitle={isSv ? 'Ingress med personens historia' : 'Wikipedia intro narrative'}
+                  cost={CLUE_COSTS.wikiSummary}
+                  isPurchased={purchasedClues.has('wikiSummary')}
+                  isExpanded={expandedClues.has('wikiSummary')}
+                  isRoundEnded={isSolved || isSurrendered}
+                  isSv={isSv}
+                  borderColor="#3b82f6"
+                  shadowColor="rgba(59, 130, 246, 0.08)"
+                  iconBg="#eff6ff"
+                  icon={<BookOpen size={18} style={{ color: '#2563eb' }} />}
+                  onToggle={() => toggleClue('wikiSummary')}
+                >
+                  <div style={{ fontSize: '0.92rem', color: '#1e293b', lineHeight: 1.55 }}>
+                    {wikiLoading ? (
+                      <div style={{ fontStyle: 'italic', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
+                        {isSv ? 'Hämtar sammanfattning från Wikipedia...' : 'Loading summary from Wikipedia...'}
+                      </div>
+                    ) : sanitizedWikiSummary ? (
+                      <>
+                        <p style={{ margin: 0, fontStyle: 'italic' }}>"{sanitizedWikiSummary}"</p>
+                        {wikiUrl && (
+                          <div style={{ marginTop: '6px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                            {isSv ? 'Källa:' : 'Source:'}{' '}
+                            <a
+                              href={wikiUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: 'var(--accent-blue)', textDecoration: 'underline', fontWeight: 600 }}
+                            >
+                              Wikipedia (CC BY-SA 4.0)
+                            </a>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{ fontStyle: 'italic', color: 'var(--text-muted)', fontSize: '0.88rem' }}>
+                        {isSv ? 'Kunde inte hämta sammanfattning från Wikipedia för denna person.' : 'Could not fetch summary from Wikipedia.'}
                       </div>
                     )}
                   </div>
+                </ClueCard>
+
+                {/* 6. Porträtt (-350 p) */}
+                {availableClues.includes('portrait') && currentPerson.image?.thumb && (
+                  <ClueCard
+                    title={isSv ? 'Porträttbild' : 'Portrait Image'}
+                    subtitle={isSv ? 'Historiskt foto eller målning' : 'Historical photo or artwork'}
+                    cost={CLUE_COSTS.portrait}
+                    isPurchased={purchasedClues.has('portrait')}
+                    isExpanded={expandedClues.has('portrait')}
+                    isRoundEnded={isSolved || isSurrendered}
+                    isSv={isSv}
+                    borderColor="#c026d3"
+                    shadowColor="rgba(192, 38, 211, 0.08)"
+                    iconBg="#fdf4ff"
+                    icon={<Eye size={18} style={{ color: '#c026d3' }} />}
+                    onToggle={() => toggleClue('portrait')}
+                  >
+                    <div style={{ textAlign: 'center' }}>
+                      <img
+                        src={currentPerson.image.thumb}
+                        alt="Portrait"
+                        style={{
+                          width: '104px',
+                          height: '104px',
+                          borderRadius: '50%',
+                          objectFit: 'cover',
+                          border: '3px solid var(--accent-gold)',
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                        }}
+                      />
+                    </div>
+                  </ClueCard>
                 )}
 
                 {/* Mobil ge upp-knapp i botten av listan */}
@@ -2708,36 +3495,18 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   <button
                     onClick={() => {
                       if (confirm(isSv ? 'Ge upp gåtan och visa svaret?' : 'Give up and show answer?')) {
-                        const cluesCost = Array.from(revealedClues).reduce((sum, c) => sum + (CLUE_COSTS[c] ?? 0), 0);
-                        const wrongCost = wrongGuesses.length * WRONG_GUESS_PENALTY;
-                        setIsSurrendered(true);
-                        setEarnedRoundScore(0);
-                        setDeductionsAtEnd({ cluesCost, wrongCost });
-                        if (isMatchActive) {
-                          setMatchResults((prev) => [
-                            ...prev,
-                            {
-                              person: currentPerson,
-                              score: 0,
-                              isSolved: false,
-                              cluesUsed: Array.from(revealedClues),
-                              wrongGuessesCount: wrongGuesses.length,
-                            },
-                          ]);
-                        }
-                        setRevealedClues(new Set(['gender', 'occupation', 'citizenship', 'works', 'description', 'portrait', 'wikiSummary']));
-                        setIsMobileSheetExpanded(true);
+                        handleSurrender();
                       }
                     }}
                     style={{
-                      marginTop: '6px',
-                      padding: '9px 12px',
-                      borderRadius: '8px',
+                      marginTop: '8px',
+                      padding: '12px 14px',
+                      borderRadius: '10px',
                       border: '1px solid #fecaca',
                       background: '#fff5f5',
                       color: '#b91c1c',
-                      fontSize: '0.8rem',
-                      fontWeight: 700,
+                      fontSize: '0.88rem',
+                      fontWeight: 800,
                       cursor: 'pointer',
                       textAlign: 'center',
                     }}
@@ -2751,27 +3520,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             {/* D. Ge upp-knapp i botten (visas på desktop, på mobil finns den i snabbkontrollerna) */}
             {!isSolved && !isSurrendered && !isMobile && (
               <button
-                onClick={() => {
-                  const cluesCost = Array.from(revealedClues).reduce((sum, c) => sum + (CLUE_COSTS[c] ?? 0), 0);
-                  const wrongCost = wrongGuesses.length * WRONG_GUESS_PENALTY;
-                  setIsSurrendered(true);
-                  setEarnedRoundScore(0);
-                  setDeductionsAtEnd({ cluesCost, wrongCost });
-                  if (isMatchActive) {
-                    setMatchResults((prev) => [
-                      ...prev,
-                      {
-                        person: currentPerson,
-                        score: 0,
-                        isSolved: false,
-                        cluesUsed: Array.from(revealedClues),
-                        wrongGuessesCount: wrongGuesses.length,
-                      },
-                    ]);
-                  }
-                  setRevealedClues(new Set(['gender', 'occupation', 'citizenship', 'works', 'description', 'portrait', 'wikiSummary']));
-                  setIsSidebarOpen(true);
-                }}
+                onClick={handleSurrender}
                 style={{
                   marginTop: 'auto',
                   padding: '7px 12px',
@@ -2874,7 +3623,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                     {isSv ? 'Starta en Match (5 gåtor)' : 'Start a Match (5 rounds)'}
                   </h3>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    {isSv ? 'Gissa 5 historiska personer och samla max 5 000 poäng' : 'Guess 5 figures and collect up to 5,000 points'}
+                    {isSv ? 'Gissa 5 historiska personer och samla upp till 5 000–7 500 poäng' : 'Guess 5 figures and collect up to 5,000–7,500 points'}
                   </div>
                 </div>
               </div>
@@ -2888,6 +3637,68 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
             {/* Filter-sektion */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', background: '#fcfaf6', padding: '16px', borderRadius: '12px', border: '1px solid #f0e9dc' }}>
+              {/* Spelläge: Historiska vs Nu levande */}
+              <div>
+                <label style={{ display: 'block', fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '5px' }}>
+                  🏛️ {isSv ? 'Personkategori / Spelläge' : 'Figure Type / Game Mode'}
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setMatchLifeStatus('historical')}
+                    style={{
+                      padding: '7px 4px',
+                      borderRadius: '8px',
+                      border: matchLifeStatus === 'historical' ? '1.5px solid #7c2d12' : '1px solid var(--border-color)',
+                      background: matchLifeStatus === 'historical' ? '#ffedd5' : '#fff',
+                      color: matchLifeStatus === 'historical' ? '#7c2d12' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.74rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🏛️ {isSv ? 'Historiska' : 'Historical'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMatchLifeStatus('living');
+                      if (matchCentury !== 'all' && matchCentury !== '20' && matchCentury !== '21') {
+                        setMatchCentury('all');
+                      }
+                    }}
+                    style={{
+                      padding: '7px 4px',
+                      borderRadius: '8px',
+                      border: matchLifeStatus === 'living' ? '1.5px solid #be123c' : '1px solid var(--border-color)',
+                      background: matchLifeStatus === 'living' ? '#ffe4e6' : '#fff',
+                      color: matchLifeStatus === 'living' ? '#be123c' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.74rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🌟 {isSv ? 'Nu levande' : 'Living'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMatchLifeStatus('all')}
+                    style={{
+                      padding: '7px 4px',
+                      borderRadius: '8px',
+                      border: matchLifeStatus === 'all' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                      background: matchLifeStatus === 'all' ? '#e0f2fe' : '#fff',
+                      color: matchLifeStatus === 'all' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.74rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🎲 {isSv ? 'Båda' : 'Both'}
+                  </button>
+                </div>
+              </div>
+
               {/* Århundrade */}
               <div>
                 <label style={{ display: 'block', fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '5px' }}>
@@ -2921,22 +3732,54 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                 <label style={{ display: 'block', fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '5px' }}>
                   🎯 {isSv ? 'Svårighetsgrad / Urval' : 'Difficulty / Tier'}
                 </label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
                   <button
                     type="button"
-                    onClick={() => setMatchTier('guess')}
+                    onClick={() => setMatchTier('easy')}
                     style={{
                       padding: '7px 4px',
                       borderRadius: '8px',
-                      border: matchTier === 'guess' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchTier === 'guess' ? '#e0f2fe' : '#fff',
-                      color: matchTier === 'guess' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      border: matchTier === 'easy' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                      background: matchTier === 'easy' ? '#e0f2fe' : '#fff',
+                      color: matchTier === 'easy' ? 'var(--accent-blue)' : 'var(--text-secondary)',
                       fontWeight: 700,
-                      fontSize: '0.76rem',
+                      fontSize: '0.74rem',
                       cursor: 'pointer',
                     }}
                   >
-                    ⭐ {isSv ? 'Kända' : 'Famous'}
+                    ⭐ {isSv ? 'Lätt' : 'Easy'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMatchTier('medium')}
+                    style={{
+                      padding: '7px 4px',
+                      borderRadius: '8px',
+                      border: matchTier === 'medium' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                      background: matchTier === 'medium' ? '#e0f2fe' : '#fff',
+                      color: matchTier === 'medium' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.74rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    📚 {isSv ? 'Medel' : 'Med'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMatchTier('hard')}
+                    style={{
+                      padding: '7px 4px',
+                      borderRadius: '8px',
+                      border: matchTier === 'hard' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                      background: matchTier === 'hard' ? '#e0f2fe' : '#fff',
+                      color: matchTier === 'hard' ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.74rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🔥 {isSv ? 'Svår' : 'Hard'}
                   </button>
                   <button
                     type="button"
@@ -2948,27 +3791,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                       background: matchTier === 'all' ? '#e0f2fe' : '#fff',
                       color: matchTier === 'all' ? 'var(--accent-blue)' : 'var(--text-secondary)',
                       fontWeight: 700,
-                      fontSize: '0.76rem',
+                      fontSize: '0.74rem',
                       cursor: 'pointer',
                     }}
                   >
                     🎲 {isSv ? 'Alla' : 'All'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMatchTier('reference')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchTier === 'reference' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchTier === 'reference' ? '#e0f2fe' : '#fff',
-                      color: matchTier === 'reference' ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.76rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🔥 {isSv ? 'Svår' : 'Hard'}
                   </button>
                 </div>
               </div>
@@ -2995,8 +3822,8 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             {/* Poänginfo */}
             <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
               💡 {isSv
-                ? 'Varje gåta ger 1 000 baspoäng. Att öppna ledtrådar (-50 till -350p) eller gissa fel (-100p) ger avdrag. Kan du slå 4 000 poäng?'
-                : 'Each round awards 1,000 base points. Clues and wrong guesses deduct points. Can you beat 4,000 points?'}
+                ? 'Varje gåta ger 1 000–1 500 baspoäng beroende på svårighetsgrad. Att öppna ledtrådar (-50 till -350p) eller gissa fel (-100p) ger avdrag.'
+                : 'Each round awards 1,000–1,500 base points depending on difficulty. Clues and wrong guesses deduct points.'}
             </div>
 
             {/* Knappar */}
@@ -3021,7 +3848,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               <button
                 type="button"
                 disabled={matchCandidatesCount < 5}
-                onClick={() => startMatch(matchCentury, matchTier, matchOnlySwedish)}
+                onClick={() => startMatch(matchCentury, matchTier, matchLifeStatus, matchOnlySwedish)}
                 style={{
                   flex: 2,
                   padding: '9px',
@@ -3082,24 +3909,25 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             {/* Match Result Header */}
             {(() => {
               const totalScore = matchResults.reduce((sum, r) => sum + r.score, 0);
-              const maxScore = 5000;
+              const maxScore = matchRounds.reduce((sum, p) => sum + getBasePoints(p.tier), 0) || 5000;
+              const pct = totalScore / maxScore;
               let title = isSv ? 'Karthistoriker' : 'Map Explorer';
               let badgeColor = '#b45309';
               let badgeBg = '#fef3c7';
 
-              if (totalScore >= 4500) {
+              if (pct >= 0.9) {
                 title = isSv ? '👑 Världsklass! En levande historisk atlas!' : '👑 World-Class! Living Historical Atlas!';
                 badgeColor = '#92400e';
                 badgeBg = '#fef08a';
-              } else if (totalScore >= 3500) {
+              } else if (pct >= 0.7) {
                 title = isSv ? '🧭 Mästerlig Kartspejare!' : '🧭 Master Cartographer!';
                 badgeColor = '#15803d';
                 badgeBg = '#dcfce7';
-              } else if (totalScore >= 2500) {
+              } else if (pct >= 0.5) {
                 title = isSv ? '📜 Skicklig Forskare!' : '📜 Skilled Researcher!';
                 badgeColor = '#1d4ed8';
                 badgeBg = '#dbeafe';
-              } else if (totalScore >= 1500) {
+              } else if (pct >= 0.3) {
                 title = isSv ? '🗺️ Godkänd Upptäckare' : '🗺️ Approved Explorer';
                 badgeColor = '#b45309';
                 badgeBg = '#fef3c7';
@@ -3161,11 +3989,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               </div>
 
               {matchResults.map((r, idx) => {
-                const pName = r.person.name[lang] || r.person.name.sv || r.person.name.en || 'Okänd';
+                const pName = loc(r.person.name, lang) || (isSv ? 'Okänd' : 'Unknown');
                 const bYear = r.person.birthDate.year;
                 const dYear = r.person.deathDate?.year;
-                const bPlace = r.person.birthPlace?.name[lang] || r.person.birthPlace?.name.sv;
-                const dPlace = r.person.deathPlace?.name[lang] || r.person.deathPlace?.name.sv;
+                const bPlace = loc(r.person.birthPlace?.name, lang);
+                const dPlace = loc(r.person.deathPlace?.name, lang);
 
                 return (
                   <div
@@ -3300,12 +4128,12 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               borderRadius: '20px 20px 0 0',
               width: '100%',
               maxWidth: '500px',
-              padding: '20px 18px',
+              padding: '20px 18px calc(20px + env(safe-area-inset-bottom, 0px))',
               boxShadow: '0 -10px 40px rgba(0,0,0,0.25)',
               display: 'flex',
               flexDirection: 'column',
               gap: '14px',
-              maxHeight: '85vh',
+              maxHeight: '85dvh',
               overflowY: 'auto',
             }}
             onClick={(e) => e.stopPropagation()}
@@ -3332,56 +4160,128 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               </button>
             </div>
 
+            {/* Livsstatus / Spelläge */}
+            <div>
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                {isSv ? 'Personkategori / Spelläge:' : 'Figure Type / Game Mode:'}
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                <button
+                  type="button"
+                  onClick={() => handleLifeStatusChange('historical')}
+                  style={{
+                    padding: '8px 4px',
+                    borderRadius: '8px',
+                    border: lifeStatus === 'historical' ? '2px solid #7c2d12' : '1px solid var(--border-color)',
+                    background: lifeStatus === 'historical' ? '#ffedd5' : '#fff',
+                    color: lifeStatus === 'historical' ? '#7c2d12' : 'var(--text-primary)',
+                    fontWeight: 700,
+                    fontSize: '0.74rem',
+                    textAlign: 'center',
+                  }}
+                >
+                  🏛️ {isSv ? 'Historiska' : 'Historical'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLifeStatusChange('living')}
+                  style={{
+                    padding: '8px 4px',
+                    borderRadius: '8px',
+                    border: lifeStatus === 'living' ? '2px solid #be123c' : '1px solid var(--border-color)',
+                    background: lifeStatus === 'living' ? '#ffe4e6' : '#fff',
+                    color: lifeStatus === 'living' ? '#be123c' : 'var(--text-primary)',
+                    fontWeight: 700,
+                    fontSize: '0.74rem',
+                    textAlign: 'center',
+                  }}
+                >
+                  🌟 {isSv ? 'Nu levande' : 'Living'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLifeStatusChange('all')}
+                  style={{
+                    padding: '8px 4px',
+                    borderRadius: '8px',
+                    border: lifeStatus === 'all' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: lifeStatus === 'all' ? 'var(--tag-bg)' : '#fff',
+                    color: lifeStatus === 'all' ? 'var(--accent-blue)' : 'var(--text-primary)',
+                    fontWeight: 700,
+                    fontSize: '0.74rem',
+                    textAlign: 'center',
+                  }}
+                >
+                  🎲 {isSv ? 'Båda' : 'Both'}
+                </button>
+              </div>
+            </div>
+
             {/* Nivå */}
             <div>
               <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)', marginBottom: '6px' }}>
                 {isSv ? 'Svårighetsgrad:' : 'Difficulty tier:'}
               </label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
                 <button
                   type="button"
-                  onClick={() => handleTierChange('guess')}
+                  onClick={() => handleTierChange('easy')}
                   style={{
-                    padding: '8px 6px',
+                    padding: '8px 4px',
                     borderRadius: '8px',
-                    border: selectedTier === 'guess' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: selectedTier === 'guess' ? 'var(--tag-bg)' : '#fff',
+                    border: selectedTier === 'easy' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: selectedTier === 'easy' ? 'var(--tag-bg)' : '#fff',
                     fontWeight: 700,
-                    fontSize: '0.78rem',
+                    fontSize: '0.74rem',
                     textAlign: 'center',
                   }}
                 >
-                  ⭐ {isSv ? 'Nivå 1: Kända' : 'Tier 1'}
+                  ⭐ {isSv ? 'Lätt' : 'Easy'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleTierChange('reference')}
+                  onClick={() => handleTierChange('medium')}
                   style={{
-                    padding: '8px 6px',
+                    padding: '8px 4px',
                     borderRadius: '8px',
-                    border: selectedTier === 'reference' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: selectedTier === 'reference' ? 'var(--tag-bg)' : '#fff',
+                    border: selectedTier === 'medium' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: selectedTier === 'medium' ? 'var(--tag-bg)' : '#fff',
                     fontWeight: 700,
-                    fontSize: '0.78rem',
+                    fontSize: '0.74rem',
                     textAlign: 'center',
                   }}
                 >
-                  📚 {isSv ? 'Nivå 2: Svårare' : 'Tier 2'}
+                  📚 {isSv ? 'Medel' : 'Med'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTierChange('hard')}
+                  style={{
+                    padding: '8px 4px',
+                    borderRadius: '8px',
+                    border: selectedTier === 'hard' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: selectedTier === 'hard' ? 'var(--tag-bg)' : '#fff',
+                    fontWeight: 700,
+                    fontSize: '0.74rem',
+                    textAlign: 'center',
+                  }}
+                >
+                  🔥 {isSv ? 'Svår' : 'Hard'}
                 </button>
                 <button
                   type="button"
                   onClick={() => handleTierChange('all')}
                   style={{
-                    padding: '8px 6px',
+                    padding: '8px 4px',
                     borderRadius: '8px',
                     border: selectedTier === 'all' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
                     background: selectedTier === 'all' ? 'var(--tag-bg)' : '#fff',
                     fontWeight: 700,
-                    fontSize: '0.78rem',
+                    fontSize: '0.74rem',
                     textAlign: 'center',
                   }}
                 >
-                  {isSv ? 'Alla' : 'All'}
+                  🎲 {isSv ? 'Alla' : 'All'}
                 </button>
               </div>
             </div>
@@ -3439,12 +4339,14 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  if (isMatchActive) return;
                   const nextVal = !requireBothCoords;
                   setRequireBothCoords(nextVal);
                   if (nextVal && (!currentPerson.birthPlace?.coord || (!currentPerson.deathPlace?.coord && currentPerson.deathDate))) {
                     const candidates = allPeople.filter((p) => {
                       if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
                       if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
+                      if (!matchesLifeStatus(p, lifeStatus)) return false;
                       if (onlySwedish && !p.swedish) return false;
                       if (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate)) return false;
                       return true;
@@ -3480,31 +4382,33 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
             {/* Knappar */}
             <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-              <button
-                type="button"
-                onClick={() => {
-                  handleNextPerson();
-                  setShowMobileFilterModal(false);
-                }}
-                style={{
-                  flex: 1,
-                  padding: '10px',
-                  borderRadius: '10px',
-                  border: 'none',
-                  background: 'var(--accent-gold)',
-                  color: '#fff',
-                  fontWeight: 800,
-                  fontSize: '0.84rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '6px',
-                  cursor: 'pointer',
-                }}
-              >
-                <Shuffle size={14} />
-                {isSv ? 'Ny gåta' : 'New puzzle'}
-              </button>
+              {!isMatchActive && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleNextPerson();
+                    setShowMobileFilterModal(false);
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '10px',
+                    borderRadius: '10px',
+                    border: 'none',
+                    background: 'var(--accent-gold)',
+                    color: '#fff',
+                    fontWeight: 800,
+                    fontSize: '0.84rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Shuffle size={14} />
+                  {isSv ? 'Ny gåta' : 'New puzzle'}
+                </button>
+              )}
 
               <button
                 type="button"
