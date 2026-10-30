@@ -1132,6 +1132,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
       setExpandedClues(new Set(availableClues));
       setIsSidebarOpen(true);
       setIsMobileSheetExpanded(true);
+      setTimeout(() => sheetScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' }), 30);
     } else {
       if (!wrongGuesses.some((wg) => wg.id === person.id)) {
         setWrongGuesses((prev) => [person, ...prev]);
@@ -1186,6 +1187,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     setExpandedClues(new Set(availableClues));
     setIsSidebarOpen(true);
     setIsMobileSheetExpanded(true);
+    setTimeout(() => sheetScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' }), 30);
   };
 
   const startMatch = (
@@ -3110,37 +3112,6 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   </div>
                 </div>
 
-                {desc && (
-                  <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: 1.4, fontStyle: 'italic' }}>
-                    "{desc}"
-                  </p>
-                )}
-
-                {wikiSummary && (
-                  <div
-                    style={{
-                      background: '#fff',
-                      padding: '10px 12px',
-                      borderRadius: '10px',
-                      border: '1px solid var(--border-color)',
-                      fontSize: '0.88rem',
-                      lineHeight: 1.5,
-                      color: 'var(--text-primary)',
-                    }}
-                  >
-                    <p>{wikiSummary}</p>
-                    {wikiUrl && (
-                      <div style={{ marginTop: '6px', fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                        {isSv ? 'Källa:' : 'Source:'}{' '}
-                        <a href={wikiUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-blue)', textDecoration: 'underline' }}>
-                          Wikipedia
-                        </a>{' '}
-                        (CC BY-SA 4.0)
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 {isSolved ? (
                   <div style={{ fontSize: '0.88rem', color: '#2e7d32', display: 'flex', flexDirection: 'column', gap: '3px' }}>
                     <div style={{ fontWeight: 800, fontSize: '0.94rem' }}>
@@ -3169,7 +3140,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   </div>
                 )}
 
-                <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
                   {onInspectPerson && (
                     <button
                       onClick={() => onInspectPerson(currentPerson)}
@@ -3262,6 +3233,37 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                     </button>
                   )}
                 </div>
+
+                {desc && (
+                  <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: 1.4, fontStyle: 'italic' }}>
+                    "{desc}"
+                  </p>
+                )}
+
+                {wikiSummary && (
+                  <div
+                    style={{
+                      background: '#fff',
+                      padding: '10px 12px',
+                      borderRadius: '10px',
+                      border: '1px solid var(--border-color)',
+                      fontSize: '0.88rem',
+                      lineHeight: 1.5,
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    <p>{wikiSummary}</p>
+                    {wikiUrl && (
+                      <div style={{ marginTop: '6px', fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                        {isSv ? 'Källa:' : 'Source:'}{' '}
+                        <a href={wikiUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-blue)', textDecoration: 'underline' }}>
+                          Wikipedia
+                        </a>{' '}
+                        (CC BY-SA 4.0)
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
