@@ -654,6 +654,7 @@ import {
   toggleCentury,
   toggleTier,
   matchesTiers,
+  normalizeTierList,
   matchesCountries,
   toggleCountry,
   extractAvailableCountries,
@@ -730,6 +731,12 @@ describe('multi-choice game filters (filters.ts)', () => {
     const veryHardP = makeMockPerson({ id: 'Q_VH', tier: 'very_hard' });
     expect(matchesTiers(stdP, ['standard', 'hard'])).toBe(true);
     expect(matchesTiers(veryHardP, ['standard', 'hard'])).toBe(false);
+
+    // Backwards-compatibility if cached localStorage or cached people.json had legacy 'easy'/'medium' tiers
+    expect(normalizeTierList(['easy'])).toEqual(['standard']);
+    expect(normalizeTierList(['easy', 'medium'])).toEqual(['standard', 'hard']);
+    const legacyEasyP = makeMockPerson({ id: 'Q_LE', tier: 'easy' as unknown as Person['tier'] });
+    expect(matchesTiers(legacyEasyP, ['standard'])).toBe(true);
   });
 
   it('filters by multiple countries across any, citizenship, birth, and death modes and maps historical predecessor states', () => {

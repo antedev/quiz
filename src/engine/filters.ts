@@ -318,25 +318,47 @@ export function toggleCentury(current: string[], clicked: string): string[] {
  * Om man utgår från startläget ['standard'] och klickar på 'very_hard' markeras ['standard', 'hard', 'very_hard'],
  * varpå man kan avmarkera valfria nivåer.
  */
+export function normalizeTier(tier: string): Tier {
+  if (tier === 'easy' || tier === 'standard') return 'standard';
+  if (tier === 'medium' || tier === 'hard') return 'hard';
+  if (tier === 'very_hard') return 'very_hard';
+  return 'standard';
+}
+
+export function normalizeTierList(tiers?: string[], legacySingle?: string): Tier[] {
+  const order: Tier[] = ['standard', 'hard', 'very_hard'];
+  if (tiers && tiers.length > 0) {
+    const mapped = new Set<Tier>(tiers.map(normalizeTier));
+    const result = order.filter((t) => mapped.has(t));
+    if (result.length > 0) return result;
+  }
+  if (legacySingle === 'all') return ['standard', 'hard', 'very_hard'];
+  if (legacySingle) return [normalizeTier(legacySingle)];
+  return ['standard'];
+}
+
 export function toggleTier(current: Tier[], clicked: Tier): Tier[] {
-  const has = current.includes(clicked);
+  const normalizedCurrent = normalizeTierList(current);
+  const normalizedClicked = normalizeTier(clicked);
+  const has = normalizedCurrent.includes(normalizedClicked);
   if (has) {
-    if (current.length <= 1) return current;
-    return current.filter((t) => t !== clicked);
+    if (normalizedCurrent.length <= 1) return normalizedCurrent;
+    return normalizedCurrent.filter((t) => t !== normalizedClicked);
   }
   // Om man står på startvalet ['standard'] och klickar på 'very_hard', markera alla tre: ['standard', 'hard', 'very_hard']
-  if (clicked === 'very_hard' && current.length === 1 && current[0] === 'standard') {
+  if (normalizedClicked === 'very_hard' && normalizedCurrent.length === 1 && normalizedCurrent[0] === 'standard') {
     return ['standard', 'hard', 'very_hard'];
   }
-  const next = [...current, clicked];
+  const next = [...normalizedCurrent, normalizedClicked];
   const order: Tier[] = ['standard', 'hard', 'very_hard'];
   return order.filter((t) => next.includes(t));
 }
 
 export function matchesTiers(person: Person, tiers: Tier[], locale?: FamiliarityLocale): boolean {
   if (tiers.length === 0 || tiers.length === 3) return true;
-  const effectiveTier = locale ? determineTier(person, locale) : person.tier;
-  return tiers.includes(effectiveTier);
+  const normalizedTiers = tiers.map(normalizeTier);
+  const effectiveTier = locale ? determineTier(person, locale) : normalizeTier(person.tier);
+  return normalizedTiers.includes(effectiveTier);
 }
 
 /**

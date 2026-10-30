@@ -45,6 +45,7 @@ import {
   matchesCountries,
   matchesLifeStatuses,
   matchesTiers,
+  normalizeTierList,
   toggleCentury,
   toggleCountry,
   toggleLifeStatus,
@@ -177,15 +178,9 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
   });
 
   // Filter-tillstånd (flerval): Standard är ['standard'] och ['historical']
-  const [selectedTiers, setSelectedTiers] = useState<Tier[]>(() => {
-    if (initialSession?.selectedTiers?.length) return initialSession.selectedTiers as Tier[];
-    if (initialSession?.selectedTier === 'all') return ['standard', 'hard', 'very_hard'];
-    if (initialSession?.selectedTier) {
-      const mapped = initialSession.selectedTier === 'easy' ? 'standard' : initialSession.selectedTier === 'medium' ? 'hard' : initialSession.selectedTier;
-      return [mapped as Tier];
-    }
-    return ['standard'];
-  });
+  const [selectedTiers, setSelectedTiers] = useState<Tier[]>(() =>
+    normalizeTierList(initialSession?.selectedTiers, initialSession?.selectedTier)
+  );
   const [selectedCenturies, setSelectedCenturies] = useState<string[]>(() => {
     if (initialSession?.selectedCenturies) return initialSession.selectedCenturies;
     if (initialSession?.selectedCentury && initialSession.selectedCentury !== 'all') return [initialSession.selectedCentury];
@@ -316,15 +311,9 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     if (initialSession?.matchCentury && initialSession.matchCentury !== 'all') return [initialSession.matchCentury];
     return [];
   });
-  const [matchTiers, setMatchTiers] = useState<Tier[]>(() => {
-    if (initialSession?.matchTiers?.length) return initialSession.matchTiers as Tier[];
-    if (initialSession?.matchTier === 'all') return ['standard', 'hard', 'very_hard'];
-    if (initialSession?.matchTier) {
-      const mapped = initialSession.matchTier === 'easy' ? 'standard' : initialSession.matchTier === 'medium' ? 'hard' : initialSession.matchTier;
-      return [mapped as Tier];
-    }
-    return ['standard'];
-  });
+  const [matchTiers, setMatchTiers] = useState<Tier[]>(() =>
+    normalizeTierList(initialSession?.matchTiers, initialSession?.matchTier)
+  );
   const [matchLifeStatuses, setMatchLifeStatuses] = useState<LifeStatusOption[]>(() => {
     if (initialSession?.matchLifeStatuses?.length) return initialSession.matchLifeStatuses as LifeStatusOption[];
     if (initialSession?.matchLifeStatus === 'all') return ['historical', 'living'];

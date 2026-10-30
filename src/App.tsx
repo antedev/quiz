@@ -78,12 +78,18 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    fetch('/data/people.json')
+    fetch('/data/people.json?v=2')
       .then((res) => {
         if (!res.ok) throw new Error(`Kunde inte läsa databasen (HTTP ${res.status})`);
         return res.json();
       })
       .then((data: PeopleDataset) => {
+        // Bakåtkompatibilitet om en äldre cachad people.json skulle ha 'easy'/'medium' som tier
+        for (const p of data.people) {
+          const rawTier = p.tier as string;
+          if (rawTier === 'easy') p.tier = 'standard';
+          else if (rawTier === 'medium') p.tier = 'hard';
+        }
         setDataset(data);
         setLoading(false);
       })
