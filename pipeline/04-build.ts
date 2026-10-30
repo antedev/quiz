@@ -11,10 +11,11 @@ import { cleanDescription } from './lib/clean.ts';
 import { bestDate } from './lib/dates.ts';
 import { CACHE_DIR, DATA_DIR, PUBLIC_DATA_DIR, readJson, readJsonIfExists, writeJson } from './lib/util.ts';
 import { pickImage } from './03-media.ts';
+import type { PageviewsCache } from './03b-pageviews.ts';
 import type { Overrides, Selection } from './01-candidates.ts';
 import type { RawClaim, RawEntities, Texts } from './02-entities.ts';
 import type { EntityRef, Gender, ImageInfo, LocalizedText, PeopleDataset, Person, Place, Tier } from '../src/types/person.ts';
-import { determineTier, classifyCategories } from '../src/engine/classification.ts';
+import { determineTier, classifyCategories, computeKandisScore } from '../src/engine/classification.ts';
 
 const GENDERS: Record<string, Gender> = { Q6581097: 'male', Q6581072: 'female' };
 const SWEDISH = new Set<string>(config.swedishCountries);
@@ -51,6 +52,7 @@ function main() {
   const selection = readJson<Selection>(join(DATA_DIR, 'selection.json'));
   const raw = readJson<RawEntities>(join(CACHE_DIR, 'entities.json'));
   const media = readJsonIfExists<Record<string, ImageInfo | null>>(join(CACHE_DIR, 'media.json'), {});
+  const pageviews = readJsonIfExists<PageviewsCache>(join(CACHE_DIR, 'pageviews.json'), {});
   const overrides = readJson<Overrides>(join(DATA_DIR, 'overrides.json'));
   const candidates = readJson<{ id: string; sitelinks: number }[]>(join(CACHE_DIR, 'candidates.json'));
   const sitelinks = new Map(candidates.map((c) => [c.id, c.sitelinks]));
@@ -328,6 +330,10 @@ function main() {
     const citizenship = refs(r.claims.P27);
     const imageFile = pickImage(r.claims.P18);
     const genderId = ordered(r.claims.P21)[0]?.value;
+    const birthPlaceObj = place(r.claims.P19, name);
+    const deathPlaceObj = deathDate ? place(r.claims.P20, name) : null;
+    const isSwedish = citizenship.some((c) => SWEDISH.has(c.id));
+    const personViews = pageviews[id];
 
     let person: Person = {
       id,
@@ -336,18 +342,24 @@ function main() {
       gender: genderId ? (GENDERS[genderId] ?? 'other') : undefined,
       birthDate,
       deathDate,
-      birthPlace: place(r.claims.P19, name),
-      deathPlace: deathDate ? place(r.claims.P20, name) : null,
+      birthPlace: birthPlaceObj,
+      deathPlace: deathPlaceObj,
       sitelinks: sitelinks.get(id) ?? 0,
       tier: determineTier({
         sitelinks: sitelinks.get(id) ?? 0,
-        swedish: citizenship.some((c) => SWEDISH.has(c.id)),
+        swedish: isSwedish,
+        citizenship,
+        birthPlace: birthPlaceObj,
+        deathPlace: deathPlaceObj,
+        birthDate,
+        deathDate,
+        pageviews: personViews,
       }),
       categories: classifyCategories({
         occupations: refs(r.claims.P106, 6),
         description,
       }),
-      swedish: citizenship.some((c) => SWEDISH.has(c.id)),
+      swedish: isSwedish,
       occupations: refs(r.claims.P106, 6),
       citizenship,
       causeOfDeath: refs(r.claims.P509, 3),
@@ -355,6 +367,7 @@ function main() {
       notableWorks: refs(r.claims.P800, 8),
       image: imageFile ? (media[imageFile] ?? null) : null,
       wiki: { ...(r.wiki.sv ? { sv: r.wiki.sv } : {}), ...(r.wiki.en ? { en: r.wiki.en } : {}) },
+      ...(personViews ? { pageviews: personViews } : {}),
     };
     if (overrides.patches[id]) person = deepMerge(person, overrides.patches[id]);
 
@@ -370,9 +383,9 @@ function main() {
   people.sort((a, b) => b.sitelinks - a.sitelinks);
   const counts: Record<string, number> = {
     total: people.length,
-    easy: people.filter((p) => p.tier === 'easy').length,
-    medium: people.filter((p) => p.tier === 'medium').length,
+    standard: people.filter((p) => p.tier === 'standard').length,
     hard: people.filter((p) => p.tier === 'hard').length,
+    very_hard: people.filter((p) => p.tier === 'very_hard').length,
     swedish: people.filter((p) => p.swedish).length,
     living: people.filter((p) => !p.deathDate).length,
     withImage: people.filter((p) => p.image).length,
@@ -390,7 +403,7 @@ function main() {
   const perCentury: Record<string, Record<Tier, number>> = {};
   for (const p of people) {
     const c = String(Math.floor(p.birthDate.year / 100) * 100);
-    (perCentury[c] ??= { easy: 0, medium: 0, hard: 0 })[p.tier]++;
+    (perCentury[c] ??= { standard: 0, hard: 0, very_hard: 0 })[p.tier]++;
   }
   writeJson(join(DATA_DIR, 'report.json'), {
     generatedAt: dataset.generatedAt,

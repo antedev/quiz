@@ -91,7 +91,10 @@ async function main() {
   console.log('Klart: data/cache/media.json');
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const isMain = process.argv[1]?.replace(/\\/g, '/').endsWith('pipeline/03-media.ts');
+if (isMain) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

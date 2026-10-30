@@ -5,6 +5,8 @@
  * så att samma struktur enkelt kan synkas mot en molndatabas (t.ex. Supabase) i Fas 2.
  */
 
+import type { Tier } from '../types/person.ts';
+
 export const AVATAR_OPTIONS = ['🧭', '👑', '🏛️', '⚔️', '📜', '🔭', '🎭', '🏆', '🦅', '⚓'] as const;
 
 export interface SavedRoundRecord {
@@ -12,7 +14,7 @@ export interface SavedRoundRecord {
   date: string;
   personId: string;
   personName: string;
-  tier: 'easy' | 'medium' | 'hard';
+  tier: Tier;
   score: number;
   isSolved: boolean;
   cluesUsedCount: number;

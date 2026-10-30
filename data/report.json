@@ -1,174 +1,174 @@
 {
-  "generatedAt": "2026-10-23T19:19:58.183Z",
+  "generatedAt": "2026-10-30T07:42:10.589Z",
   "counts": {
     "total": 7829,
-    "easy": 575,
-    "medium": 3332,
-    "hard": 3922,
+    "standard": 542,
+    "hard": 4238,
+    "very_hard": 3049,
     "swedish": 1593,
     "living": 2104,
     "withImage": 7672
   },
   "perCentury": {
     "0": {
-      "easy": 3,
-      "medium": 25,
-      "hard": 32
+      "standard": 3,
+      "hard": 29,
+      "very_hard": 28
     },
     "100": {
-      "easy": 1,
-      "medium": 17,
-      "hard": 26
+      "standard": 1,
+      "hard": 21,
+      "very_hard": 22
     },
     "200": {
-      "easy": 1,
-      "medium": 16,
-      "hard": 29
+      "standard": 2,
+      "hard": 29,
+      "very_hard": 15
     },
     "300": {
-      "easy": 1,
-      "medium": 21,
-      "hard": 29
+      "standard": 2,
+      "hard": 15,
+      "very_hard": 34
     },
     "400": {
-      "easy": 0,
-      "medium": 16,
-      "hard": 20
+      "standard": 0,
+      "hard": 10,
+      "very_hard": 26
     },
     "500": {
-      "easy": 3,
-      "medium": 14,
-      "hard": 38
+      "standard": 1,
+      "hard": 14,
+      "very_hard": 40
     },
     "600": {
-      "easy": 0,
-      "medium": 21,
-      "hard": 37
+      "standard": 0,
+      "hard": 11,
+      "very_hard": 47
     },
     "700": {
-      "easy": 4,
-      "medium": 21,
-      "hard": 42
+      "standard": 1,
+      "hard": 11,
+      "very_hard": 55
     },
     "800": {
-      "easy": 0,
-      "medium": 14,
-      "hard": 70
+      "standard": 0,
+      "hard": 20,
+      "very_hard": 64
     },
     "900": {
-      "easy": 2,
-      "medium": 16,
-      "hard": 69
+      "standard": 8,
+      "hard": 32,
+      "very_hard": 47
     },
     "1000": {
-      "easy": 2,
-      "medium": 11,
-      "hard": 72
+      "standard": 3,
+      "hard": 25,
+      "very_hard": 57
     },
     "1100": {
-      "easy": 2,
-      "medium": 28,
-      "hard": 60
+      "standard": 6,
+      "hard": 39,
+      "very_hard": 45
     },
     "1200": {
-      "easy": 4,
-      "medium": 35,
-      "hard": 58
+      "standard": 5,
+      "hard": 48,
+      "very_hard": 44
     },
     "1300": {
-      "easy": 9,
-      "medium": 30,
-      "hard": 84
+      "standard": 6,
+      "hard": 54,
+      "very_hard": 63
     },
     "1400": {
-      "easy": 17,
-      "medium": 71,
-      "hard": 104
+      "standard": 17,
+      "hard": 107,
+      "very_hard": 68
     },
     "1500": {
-      "easy": 14,
-      "medium": 90,
-      "hard": 158
+      "standard": 22,
+      "hard": 126,
+      "very_hard": 114
     },
     "1600": {
-      "easy": 22,
-      "medium": 70,
-      "hard": 205
+      "standard": 19,
+      "hard": 125,
+      "very_hard": 153
     },
     "1700": {
-      "easy": 53,
-      "medium": 179,
-      "hard": 216
+      "standard": 38,
+      "hard": 243,
+      "very_hard": 167
     },
     "1800": {
-      "easy": 171,
-      "medium": 638,
-      "hard": 693
+      "standard": 126,
+      "hard": 790,
+      "very_hard": 586
     },
     "1900": {
-      "easy": 230,
-      "medium": 1920,
-      "hard": 1589
+      "standard": 258,
+      "hard": 2296,
+      "very_hard": 1185
     },
     "2000": {
-      "easy": 1,
-      "medium": 16,
-      "hard": 132
+      "standard": 3,
+      "hard": 89,
+      "very_hard": 57
     },
     "-100": {
-      "easy": 8,
-      "medium": 14,
-      "hard": 38
+      "standard": 7,
+      "hard": 30,
+      "very_hard": 23
     },
     "-400": {
-      "easy": 6,
-      "medium": 13,
-      "hard": 21
+      "standard": 2,
+      "hard": 18,
+      "very_hard": 20
     },
     "-600": {
-      "easy": 6,
-      "medium": 9,
-      "hard": 8
+      "standard": 3,
+      "hard": 12,
+      "very_hard": 8
     },
     "-500": {
-      "easy": 7,
-      "medium": 8,
-      "hard": 18
+      "standard": 3,
+      "hard": 14,
+      "very_hard": 16
     },
     "-300": {
-      "easy": 3,
-      "medium": 5,
-      "hard": 35
+      "standard": 2,
+      "hard": 8,
+      "very_hard": 33
     },
     "-200": {
-      "easy": 2,
-      "medium": 6,
-      "hard": 32
+      "standard": 1,
+      "hard": 10,
+      "very_hard": 29
     },
     "-700": {
-      "easy": 3,
-      "medium": 4,
-      "hard": 1
+      "standard": 1,
+      "hard": 6,
+      "very_hard": 1
     },
     "-1400": {
-      "easy": 0,
-      "medium": 3,
-      "hard": 2
+      "standard": 2,
+      "hard": 3,
+      "very_hard": 0
     },
     "-1500": {
-      "easy": 0,
-      "medium": 1,
-      "hard": 0
+      "standard": 0,
+      "hard": 1,
+      "very_hard": 0
     },
     "-800": {
-      "easy": 0,
-      "medium": 0,
-      "hard": 3
+      "standard": 0,
+      "hard": 1,
+      "very_hard": 2
     },
     "-900": {
-      "easy": 0,
-      "medium": 0,
-      "hard": 1
+      "standard": 0,
+      "hard": 1,
+      "very_hard": 0
     }
   },
   "problemCounts": {
@@ -179,7 +179,7 @@
     "info: bild saknas": 157,
     "info: svenskt namn saknas": 21,
     "info: yrke saknas": 29,
-    "info: dödsort saknas": 109
+    "info: dödsort saknas": 110
   },
   "problems": {
     "uteslutna: osäkert födelsedatum": [
@@ -1458,6 +1458,7 @@
       "Q333730",
       "Q354823",
       "Q380004",
+      "Q314490",
       "Q311011",
       "Q32052",
       "Q312330",

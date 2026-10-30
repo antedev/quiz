@@ -58,12 +58,12 @@ export const PersonCard: React.FC<PersonCardProps> = ({ person, lang, isSolved, 
         }}
       >
         <div style={{ display: 'flex', gap: '5px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <span className={`badge ${person.tier === 'easy' ? 'badge-guess' : person.tier === 'medium' ? 'badge-med' : 'badge-ref'}`}>
-            {person.tier === 'easy'
-              ? (isSv ? '⭐ Lätt' : '⭐ Easy')
-              : person.tier === 'medium'
-              ? (isSv ? '📚 Medel' : '📚 Med')
-              : (isSv ? '🔥 Svår' : '🔥 Hard')}
+          <span className={`badge ${person.tier === 'standard' ? 'badge-guess' : person.tier === 'hard' ? 'badge-med' : 'badge-ref'}`}>
+            {person.tier === 'standard'
+              ? (isSv ? '⭐ Standard' : '⭐ Standard')
+              : person.tier === 'hard'
+              ? (isSv ? '🔥 Svår' : '🔥 Hard')
+              : (isSv ? '⚡ Mycket svår' : '⚡ Very Hard')}
           </span>
           {person.swedish && (
             <span className="badge badge-swedish">

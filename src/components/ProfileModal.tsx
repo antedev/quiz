@@ -95,8 +95,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   }, [solvedPeople, collectionSearch, lang]);
 
   const tierStats = useMemo(() => {
-    const totals = { easy: 0, medium: 0, hard: 0, swedish: 0 };
-    const solved = { easy: 0, medium: 0, hard: 0, swedish: 0 };
+    const totals = { standard: 0, hard: 0, very_hard: 0, swedish: 0 };
+    const solved = { standard: 0, hard: 0, very_hard: 0, swedish: 0 };
     const solvedSet = new Set(activeProfile.solvedPersonIds);
 
     for (const p of allPeople) {
@@ -472,23 +472,23 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '8px' }}>
                   {[
                     {
-                      label: isSv ? '⭐ Lätt (Världskända)' : '⭐ Easy (World famous)',
-                      solved: tierStats.solved.easy,
-                      total: tierStats.totals.easy,
+                      label: isSv ? '⭐ Standard' : '⭐ Standard',
+                      solved: tierStats.solved.standard,
+                      total: tierStats.totals.standard,
                       color: '#16a34a',
                       bg: '#f0fdf4',
-                    },
-                    {
-                      label: isSv ? '📚 Medel' : '📚 Medium',
-                      solved: tierStats.solved.medium,
-                      total: tierStats.totals.medium,
-                      color: '#2563eb',
-                      bg: '#eff6ff',
                     },
                     {
                       label: isSv ? '🔥 Svår' : '🔥 Hard',
                       solved: tierStats.solved.hard,
                       total: tierStats.totals.hard,
+                      color: '#2563eb',
+                      bg: '#eff6ff',
+                    },
+                    {
+                      label: isSv ? '⚡ Mycket svår' : '⚡ Very Hard',
+                      solved: tierStats.solved.very_hard,
+                      total: tierStats.totals.very_hard,
                       color: '#dc2626',
                       bg: '#fef2f2',
                     },

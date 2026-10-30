@@ -124,12 +124,12 @@ export const PersonModal: React.FC<PersonModalProps> = ({
 
             <div style={{ padding: '1.25rem', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
               <div style={{ display: 'flex', gap: '6px', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
-                <span className={`badge ${person.tier === 'easy' ? 'badge-guess' : person.tier === 'medium' ? 'badge-med' : 'badge-ref'}`}>
-                  {person.tier === 'easy'
-                    ? (isSv ? '⭐ Lätt (Ikon & Kändis)' : '⭐ Easy (Icon)')
-                    : person.tier === 'medium'
-                    ? (isSv ? '📚 Medel (Allmänbildning)' : '📚 Medium (General)')
-                    : (isSv ? '🔥 Svår (Nisch & Historia)' : '🔥 Hard (Niche)')}
+                <span className={`badge ${person.tier === 'standard' ? 'badge-guess' : person.tier === 'hard' ? 'badge-med' : 'badge-ref'}`}>
+                  {person.tier === 'standard'
+                    ? (isSv ? '⭐ Standard (Ikon & Kändis)' : '⭐ Standard (Icon & Well-known)')
+                    : person.tier === 'hard'
+                    ? (isSv ? '🔥 Svår (Allmänbildning)' : '🔥 Hard (General knowledge)')
+                    : (isSv ? '⚡ Mycket svår (Fördjupning & Nisch)' : '⚡ Very Hard (In-depth & Niche)')}
                 </span>
                 {person.categories && person.categories.map((cat) => {
                   const info = QUIZ_CATEGORIES[cat] || QUIZ_CATEGORIES.other;

@@ -51,11 +51,11 @@ export interface ImageInfo {
 
 /**
  * Tre svårighetsgrader för quiz:
- * easy   = Lätt (Ikoner & Kändisar, kandisScore >= 140)
- * medium = Medel (Allmänbildning, kandisScore 75–139)
- * hard   = Svår (Nisch & Historia, kandisScore < 75)
+ * standard  = Standard (Ikoner & Hushållsnamn, kandisScore >= 140)
+ * hard      = Svår (Allmänbildning & Historia, kandisScore 75–139)
+ * very_hard = Mycket svår (Fördjupning & Nisch, kandisScore < 75)
  */
-export type Tier = 'easy' | 'medium' | 'hard';
+export type Tier = 'standard' | 'hard' | 'very_hard';
 
 /** Urvalspool i data-pipelinen (steg 1). */
 export type PoolTier = 'guess' | 'reference';
@@ -112,6 +112,8 @@ export interface Person {
   image: ImageInfo | null;
   /** Artikeltitlar på Wikipedia */
   wiki: LocalizedText;
+  /** Spik-tvättade 30-dagars sidvisningar per Wikipedia-språkutgåva (t.ex. { sv: 13200, en: 45000 }) */
+  pageviews?: Record<string, number>;
 }
 
 export interface PeopleDataset {

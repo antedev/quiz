@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { toHistDate, bestDate } from '../../../pipeline/lib/dates.ts';
 import { loc, type PeopleDataset, type Person } from '../../types/person.ts';
 import { evaluateTransition, draftCards, pickStartPerson } from '../chain.ts';
-import { classifyCategories, determineTier } from '../classification.ts';
+import { classifyCategories, computeKandisScore, determineTier, LOCALE_PRESETS } from '../classification.ts';
+import { computeSpikeResistantViews } from '../../../pipeline/03b-pageviews.ts';
 import { findContemporaries, formatDate, getSafePlaceName } from '../clues.ts';
 import { levenshtein, normalizePhonetic, searchPeopleForgiving } from '../fuzzySearch.ts';
 import { compareGuess } from '../guessFeedback.ts';
@@ -16,7 +17,7 @@ function makeMockPerson(overrides: Partial<Person> & { id: string }): Person {
     description: { sv: 'svensk författare', en: 'Swedish writer' },
     wiki: { sv: 'Testperson', en: 'Test_Person' },
     sitelinks: 50,
-    tier: 'medium',
+    tier: 'hard',
     swedish: true,
     gender: 'male',
     birthDate: { iso: '1850-01-01', year: 1850, precision: 'day', calendar: 'gregorian' },
@@ -212,11 +213,77 @@ describe('classification (US-03)', () => {
   });
 
   it('assigns tier based on sitelinks and Swedish connection', () => {
-    expect(determineTier({ sitelinks: 150, swedish: false })).toBe('easy');
-    expect(determineTier({ sitelinks: 70, swedish: true })).toBe('easy');
-    expect(determineTier({ sitelinks: 90, swedish: false })).toBe('medium');
-    expect(determineTier({ sitelinks: 40, swedish: true })).toBe('medium');
-    expect(determineTier({ sitelinks: 25, swedish: false })).toBe('hard');
+    expect(determineTier({ sitelinks: 150, swedish: false })).toBe('standard');
+    expect(determineTier({ sitelinks: 70, swedish: true })).toBe('standard');
+    expect(determineTier({ sitelinks: 90, swedish: false })).toBe('hard');
+    expect(determineTier({ sitelinks: 40, swedish: true })).toBe('hard');
+    expect(determineTier({ sitelinks: 25, swedish: false })).toBe('very_hard');
+  });
+
+  it('computes spike-resistant 30-day pageviews by trimming short news spikes while preserving low-traffic resolution', () => {
+    // 26 steady days of 10 views + 4 news-spike days of 5000 views -> trimmed to 10/day * 30 = 300
+    const dailyWithSpike: Record<string, number> = {};
+    for (let i = 1; i <= 26; i++) dailyWithSpike[`2026-09-${String(i).padStart(2, '0')}`] = 10;
+    for (let i = 27; i <= 30; i++) dailyWithSpike[`2026-09-${i}`] = 5000;
+    expect(computeSpikeResistantViews(dailyWithSpike)).toBe(300);
+
+    // Low-traffic article (mostly 0s and 1s) retains non-zero resolution
+    const lowTraffic: Record<string, number> = {};
+    for (let i = 1; i <= 20; i++) lowTraffic[`2026-09-${String(i).padStart(2, '0')}`] = 0;
+    for (let i = 21; i <= 30; i++) lowTraffic[`2026-09-${i}`] = 1;
+    expect(computeSpikeResistantViews(lowTraffic)).toBeGreaterThan(0);
+  });
+
+  it('generalizes difficulty across languages and shared-language countries (SE, US, GB, AU, DE) without a 2.2x hack', () => {
+    // 1. High-sitelink global stub with tiny local readership (e.g. Guillermo Lasso: 161 sitelinks, 8 sv views) -> very_hard in SE
+    const globalStub = {
+      sitelinks: 161,
+      swedish: false,
+      birthDate: { year: 1955 },
+      deathDate: null,
+      pageviews: { sv: 8, en: 2368 },
+    };
+    expect(determineTier(globalStub, LOCALE_PRESETS.SE)).toBe('very_hard');
+
+    // 2. Famous Swedish figure with moderate sitelinks but high sv.wikipedia readership (e.g. Gustav III: 61 sitelinks, 5864 sv views)
+    const gustavIII = {
+      sitelinks: 61,
+      swedish: true,
+      citizenship: [{ id: 'Q34', name: { sv: 'Sverige' } }],
+      birthDate: { year: 1746 },
+      deathDate: { year: 1792 },
+      pageviews: { sv: 5864, en: 10783 },
+    };
+    expect(determineTier(gustavIII, LOCALE_PRESETS.SE)).toBe('standard');
+    expect(determineTier(gustavIII, LOCALE_PRESETS.US)).toBe('hard');
+
+    // 3. Shared English Wikipedia (US vs GB vs AU): an Australian figure (Q408) is compensated for AU's ~3.5% share of en.wikipedia
+    const australianIcon = {
+      sitelinks: 95,
+      swedish: false,
+      citizenship: [{ id: 'Q408', name: { en: 'Australia' } }],
+      birthDate: { year: 1957 },
+      deathDate: null,
+      pageviews: { sv: 85, en: 42000 },
+    };
+    expect(computeKandisScore(australianIcon, LOCALE_PRESETS.AU)).toBeGreaterThan(
+      computeKandisScore(australianIcon, LOCALE_PRESETS.US)
+    );
+    expect(determineTier(australianIcon, LOCALE_PRESETS.AU)).toBe('standard');
+    expect(determineTier(australianIcon, LOCALE_PRESETS.US)).toBe('hard');
+
+    // 4. Historical British figure (Kingdom of England Q179876 -> Q145) scores higher for GB than US on en.wikipedia
+    const britishHistorical = {
+      sitelinks: 98,
+      swedish: false,
+      citizenship: [{ id: 'Q179876', name: { en: 'Kingdom of England' } }],
+      birthDate: { year: 1630 },
+      deathDate: { year: 1685 },
+      pageviews: { sv: 550, en: 65000 },
+    };
+    expect(computeKandisScore(britishHistorical, LOCALE_PRESETS.GB)).toBeGreaterThan(
+      computeKandisScore(britishHistorical, LOCALE_PRESETS.US)
+    );
   });
 });
 
@@ -289,12 +356,12 @@ describe('Dataset integrity (public/data/people.json & wiki_summaries.json)', ()
   const datasetPath = join(process.cwd(), 'public', 'data', 'people.json');
   const dataset = JSON.parse(readFileSync(datasetPath, 'utf8')) as PeopleDataset;
 
-  it('contains valid easy, medium, and hard tiers and non-empty categories', () => {
+  it('contains valid standard, hard, and very_hard tiers and non-empty categories', () => {
     expect(dataset.people.length).toBeGreaterThan(3500);
     const tiers = new Set(dataset.people.map((p) => p.tier));
-    expect(tiers.has('easy')).toBe(true);
-    expect(tiers.has('medium')).toBe(true);
+    expect(tiers.has('standard')).toBe(true);
     expect(tiers.has('hard')).toBe(true);
+    expect(tiers.has('very_hard')).toBe(true);
 
     for (const p of dataset.people) {
       expect((p.categories ?? []).length).toBeGreaterThan(0);
@@ -400,7 +467,7 @@ describe('sessionPersistence', () => {
     expect(loadGeoSession()).toBeNull();
 
     saveGeoSession({
-      selectedTier: 'medium',
+      selectedTier: 'hard',
       selectedCentury: '1800',
       onlySwedish: true,
       requireBothCoords: false,
@@ -427,14 +494,14 @@ describe('sessionPersistence', () => {
       ],
       isMatchSummaryOpen: false,
       matchCentury: 'all',
-      matchTier: 'easy',
+      matchTier: 'standard',
       matchOnlySwedish: false,
     });
 
     const restored = loadGeoSession();
     expect(restored).not.toBeNull();
     expect(restored?.currentPersonId).toBe('Q1043');
-    expect(restored?.selectedTier).toBe('medium');
+    expect(restored?.selectedTier).toBe('hard');
     expect(restored?.selectedCentury).toBe('1800');
     expect(restored?.onlySwedish).toBe(true);
     expect(restored?.purchasedClues).toEqual(['occupation', 'wikiSummary']);
@@ -488,7 +555,7 @@ describe('profileStore (Phase 1 player profile, scores & collection)', () => {
     state = recordRoundInState(state, {
       personId: 'Q1043',
       personName: 'Carl von Linné',
-      tier: 'easy',
+      tier: 'standard',
       score: 925,
       isSolved: true,
       cluesUsedCount: 1,
@@ -506,7 +573,7 @@ describe('profileStore (Phase 1 player profile, scores & collection)', () => {
     state = recordRoundInState(state, {
       personId: 'Q762',
       personName: 'Leonardo da Vinci',
-      tier: 'easy',
+      tier: 'standard',
       score: 0,
       isSolved: false,
       cluesUsedCount: 3,
@@ -523,7 +590,7 @@ describe('profileStore (Phase 1 player profile, scores & collection)', () => {
     state = recordMatchInState(state, {
       totalScore: 4200,
       solvedCount: 4,
-      tierFilter: 'easy',
+      tierFilter: 'standard',
       centuryFilter: 'all',
       swedishOnly: false,
       rounds: [
@@ -554,7 +621,7 @@ describe('profileStore (Phase 1 player profile, scores & collection)', () => {
     state = recordRoundInState(state, {
       personId: 'Q52938',
       personName: 'August Strindberg',
-      tier: 'easy',
+      tier: 'standard',
       score: 1000,
       isSolved: true,
       cluesUsedCount: 0,
@@ -579,6 +646,139 @@ describe('profileStore (Phase 1 player profile, scores & collection)', () => {
     expect(getActiveProfile(importedState!).solvedPersonIds).toContain('Q52938');
   });
 });
+
+import {
+  toggleLifeStatus,
+  matchesLifeStatuses,
+  matchesCenturies,
+  toggleCentury,
+  toggleTier,
+  matchesTiers,
+  matchesCountries,
+  toggleCountry,
+  extractAvailableCountries,
+} from '../filters.ts';
+
+describe('multi-choice game filters (filters.ts)', () => {
+  it('toggles life statuses (historical / living) without an explicit both button and keeps at least one selected', () => {
+    let statuses = toggleLifeStatus(['historical'], 'living');
+    expect(statuses).toEqual(['historical', 'living']);
+
+    // Deselecting historical leaves living
+    statuses = toggleLifeStatus(statuses, 'historical');
+    expect(statuses).toEqual(['living']);
+
+    // Clicking the last remaining option keeps it active
+    statuses = toggleLifeStatus(statuses, 'living');
+    expect(statuses).toEqual(['living']);
+
+    const historicalPerson = makeMockPerson({ id: 'Q_HIST', deathDate: { iso: '1900-01-01', year: 1900, precision: 'day', calendar: 'gregorian' } });
+    const livingPerson = makeMockPerson({ id: 'Q_LIV', deathDate: null });
+
+    expect(matchesLifeStatuses(historicalPerson, ['historical'])).toBe(true);
+    expect(matchesLifeStatuses(livingPerson, ['historical'])).toBe(false);
+    expect(matchesLifeStatuses(livingPerson, ['living'])).toBe(true);
+    expect(matchesLifeStatuses(historicalPerson, ['historical', 'living'])).toBe(true);
+    expect(matchesLifeStatuses(livingPerson, ['historical', 'living'])).toBe(true);
+  });
+
+  it('matches epochs when either birth year OR death year falls in any selected century (e.g. 1400 and 1600)', () => {
+    let centuries = toggleCentury([], '1400');
+    centuries = toggleCentury(centuries, '1600');
+    expect(centuries).toEqual(['1400', '1600']);
+
+    const p1384_1456 = makeMockPerson({
+      id: 'Q_1384_1456',
+      birthDate: { iso: '1384-01-01', year: 1384, precision: 'year', calendar: 'julian' },
+      deathDate: { iso: '1456-01-01', year: 1456, precision: 'year', calendar: 'julian' },
+    });
+    const p1567_1604 = makeMockPerson({
+      id: 'Q_1567_1604',
+      birthDate: { iso: '1567-01-01', year: 1567, precision: 'year', calendar: 'julian' },
+      deathDate: { iso: '1604-01-01', year: 1604, precision: 'year', calendar: 'julian' },
+    });
+    const p1503_1578 = makeMockPerson({
+      id: 'Q_1503_1578',
+      birthDate: { iso: '1503-01-01', year: 1503, precision: 'year', calendar: 'julian' },
+      deathDate: { iso: '1578-01-01', year: 1578, precision: 'year', calendar: 'julian' },
+    });
+
+    expect(matchesCenturies(p1384_1456, centuries)).toBe(true);
+    expect(matchesCenturies(p1567_1604, centuries)).toBe(true);
+    expect(matchesCenturies(p1503_1578, centuries)).toBe(false);
+    expect(matchesCenturies(p1503_1578, [])).toBe(true); // Empty = all epochs
+  });
+
+  it('expands to standard+hard+very_hard when selecting very_hard from default standard, then allows deselecting individual tiers', () => {
+    let tiers = toggleTier(['standard'], 'very_hard');
+    expect(tiers).toEqual(['standard', 'hard', 'very_hard']);
+
+    // Now user can deselect standard or hard
+    tiers = toggleTier(tiers, 'standard');
+    expect(tiers).toEqual(['hard', 'very_hard']);
+
+    tiers = toggleTier(tiers, 'hard');
+    expect(tiers).toEqual(['very_hard']);
+
+    // Cannot deselect the last remaining tier
+    expect(toggleTier(tiers, 'very_hard')).toEqual(['very_hard']);
+
+    // Selecting hard from standard gives standard + hard
+    expect(toggleTier(['standard'], 'hard')).toEqual(['standard', 'hard']);
+
+    const stdP = makeMockPerson({ id: 'Q_S', tier: 'standard' });
+    const veryHardP = makeMockPerson({ id: 'Q_VH', tier: 'very_hard' });
+    expect(matchesTiers(stdP, ['standard', 'hard'])).toBe(true);
+    expect(matchesTiers(veryHardP, ['standard', 'hard'])).toBe(false);
+  });
+
+  it('filters by multiple countries across any, citizenship, birth, and death modes and maps historical predecessor states', () => {
+    const alfredNobel = makeMockPerson({
+      id: 'Q_NOBEL',
+      swedish: true,
+      citizenship: [{ id: 'Q34', name: { sv: 'Sverige', en: 'Sweden' } }],
+      birthPlace: {
+        id: 'Q1754',
+        name: { sv: 'Stockholm', en: 'Stockholm' },
+        coord: [59.33, 18.06],
+        country: { id: 'Q34', name: { sv: 'Sverige', en: 'Sweden' } },
+      },
+      deathPlace: {
+        id: 'Q34156',
+        name: { sv: 'Sanremo', en: 'Sanremo' },
+        coord: [43.81, 7.77],
+        country: { id: 'Q38', name: { sv: 'Italien', en: 'Italy' } },
+      },
+    });
+
+    const prussianPerson = makeMockPerson({
+      id: 'Q_PRUSSIA',
+      swedish: false,
+      citizenship: [{ id: 'Q27306', name: { sv: 'Konungariket Preussen', en: 'Kingdom of Prussia' } }],
+      birthPlace: {
+        id: 'Q64',
+        name: { sv: 'Berlin', en: 'Berlin' },
+        coord: [52.52, 13.4],
+        country: { id: 'Q183', name: { sv: 'Tyskland', en: 'Germany' } },
+      },
+    });
+
+    const countries = toggleCountry([], 'Q38'); // Italy
+    expect(matchesCountries(alfredNobel, countries, 'any')).toBe(true);
+    expect(matchesCountries(alfredNobel, countries, 'death')).toBe(true);
+    expect(matchesCountries(alfredNobel, countries, 'birth')).toBe(false);
+    expect(matchesCountries(alfredNobel, countries, 'citizenship')).toBe(false);
+
+    // Historical Kingdom of Prussia (Q27306) maps to Germany (Q183) even in strict citizenship mode
+    expect(matchesCountries(prussianPerson, ['Q183'], 'citizenship')).toBe(true);
+
+    const extracted = extractAvailableCountries([alfredNobel, prussianPerson], 'sv');
+    expect(extracted.map((c) => c.id)).toContain('Q34');
+    expect(extracted.map((c) => c.id)).toContain('Q38');
+    expect(extracted.map((c) => c.id)).toContain('Q183');
+  });
+});
+
 
 
 

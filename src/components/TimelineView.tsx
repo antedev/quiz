@@ -74,7 +74,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ people, lang, onInsp
   const allSortedPeople = useMemo(() => {
     const list = people.filter((p) => {
       if (onlySwedish && !p.swedish) return false;
-      if (onlyGuessTier && p.tier !== 'easy' && p.tier !== 'medium') return false;
+      if (onlyGuessTier && p.tier !== 'standard' && p.tier !== 'hard') return false;
       if (search.trim()) {
         const q = search.toLowerCase();
         const name = loc(p.name, lang).toLowerCase();

@@ -1,4 +1,5 @@
 import { loc, type HistDate, type Lang, type Person, type Place } from '../types/person.ts';
+import { computeKandisScore, type FamiliarityLocale } from './classification.ts';
 
 export interface ContemporaryMatch {
   person: Person;
@@ -137,8 +138,9 @@ export function findContemporaries(
     return overlapEnd - overlapStart >= 15;
   });
 
-  // Sortera efter kändisskap (sitelinks)
-  candidates.sort((a, b) => b.sitelinks - a.sitelinks);
+  // Sortera efter generaliserat kändisskapsindex (sidvisningar + sitelinks) för valt språk
+  const locale: FamiliarityLocale = lang === 'sv' ? { lang: 'sv', country: 'Q34' } : { lang: 'en', country: 'Q30' };
+  candidates.sort((a, b) => computeKandisScore(b, locale) - computeKandisScore(a, locale) || b.sitelinks - a.sitelinks);
 
   const selected = candidates.slice(0, maxCount);
 

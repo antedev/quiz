@@ -466,9 +466,9 @@ export const App: React.FC = () => {
           <div style={{ maxWidth: '1400px', margin: '0.75rem auto 0', display: 'flex', gap: '8px', flexWrap: 'wrap', fontSize: '0.78rem' }}>
             <span style={{ color: 'var(--text-muted)' }}>{isSv ? 'I databasen:' : 'In database:'}</span>
             <span className="badge badge-ref">{isSv ? 'Totalt' : 'Total'}: {dataset?.counts.total}</span>
-            <span className="badge badge-guess">⭐ {isSv ? 'Lätt' : 'Easy'}: {dataset?.counts.easy}</span>
-            <span className="badge badge-med">📚 {isSv ? 'Medel' : 'Medium'}: {dataset?.counts.medium}</span>
-            <span className="badge badge-ref">🔥 {isSv ? 'Svår' : 'Hard'}: {dataset?.counts.hard}</span>
+            <span className="badge badge-guess">⭐ {isSv ? 'Standard' : 'Standard'}: {dataset?.counts.standard}</span>
+            <span className="badge badge-med">🔥 {isSv ? 'Svår' : 'Hard'}: {dataset?.counts.hard}</span>
+            <span className="badge badge-ref">⚡ {isSv ? 'Mycket svår' : 'Very Hard'}: {dataset?.counts.very_hard}</span>
             <span className="badge badge-swedish">🇸🇪 {isSv ? 'Svenska' : 'Swedish'}: {dataset?.counts.swedish}</span>
             <span className="badge badge-living">❤️ {isSv ? 'Nu levande' : 'Living'}: {dataset?.counts.living}</span>
             <span className="badge badge-ref">🖼️ {isSv ? 'Med porträtt' : 'With portrait'}: {dataset?.counts.withImage}</span>
@@ -579,11 +579,11 @@ export const App: React.FC = () => {
                   onClick={() =>
                     setSelectedTier(
                       selectedTier === 'all'
-                        ? 'easy'
-                        : selectedTier === 'easy'
-                        ? 'medium'
-                        : selectedTier === 'medium'
+                        ? 'standard'
+                        : selectedTier === 'standard'
                         ? 'hard'
+                        : selectedTier === 'hard'
+                        ? 'very_hard'
                         : 'all'
                     )
                   }
@@ -597,11 +597,11 @@ export const App: React.FC = () => {
                 >
                   {selectedTier === 'all'
                     ? (isSv ? 'Alla nivåer' : 'All tiers')
-                    : selectedTier === 'easy'
-                    ? (isSv ? '⭐ Bara Lätt' : '⭐ Only Easy')
-                    : selectedTier === 'medium'
-                    ? (isSv ? '📚 Bara Medel' : '📚 Only Medium')
-                    : (isSv ? '🔥 Bara Svår' : '🔥 Only Hard')}
+                    : selectedTier === 'standard'
+                    ? (isSv ? '⭐ Bara Standard' : '⭐ Only Standard')
+                    : selectedTier === 'hard'
+                    ? (isSv ? '🔥 Bara Svår' : '🔥 Only Hard')
+                    : (isSv ? '⚡ Bara Mycket svår' : '⚡ Only Very Hard')}
                 </button>
 
                 {/* Svensk */}

@@ -26,11 +26,16 @@ export interface PersistedMatchResult {
 export interface PersistedGeoSession {
   version: 1;
   savedAt: number;
-  // Filter
-  selectedTier: string;
-  selectedCentury: string;
+  // Filter (bakåtkompatibla + nya flervalsfält)
+  selectedTier?: string;
+  selectedTiers?: string[];
+  selectedCentury?: string;
+  selectedCenturies?: string[];
   lifeStatus?: string;
-  onlySwedish: boolean;
+  lifeStatuses?: string[];
+  onlySwedish?: boolean;
+  selectedCountries?: string[];
+  countryMatchMode?: string;
   requireBothCoords: boolean;
   showGhostPins: boolean;
   // Aktuell rond
@@ -48,10 +53,15 @@ export interface PersistedGeoSession {
   currentRoundIndex: number;
   matchResults: PersistedMatchResult[];
   isMatchSummaryOpen: boolean;
-  matchCentury: string;
-  matchTier: string;
+  matchCentury?: string;
+  matchCenturies?: string[];
+  matchTier?: string;
+  matchTiers?: string[];
   matchLifeStatus?: string;
-  matchOnlySwedish: boolean;
+  matchLifeStatuses?: string[];
+  matchOnlySwedish?: boolean;
+  matchCountries?: string[];
+  matchCountryMatchMode?: string;
 }
 
 export interface PersistedAppState {

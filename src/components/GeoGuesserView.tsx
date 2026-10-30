@@ -37,6 +37,21 @@ import {
 import { ClueCard } from './geoguesser/ClueCard.tsx';
 import { loadGeoSession, saveGeoSession } from '../engine/sessionPersistence.ts';
 import type { SavedRoundRecord, SavedMatchRecord } from '../engine/profileStore.ts';
+import {
+  CENTURY_OPTIONS,
+  QUICK_COUNTRY_IDS,
+  extractAvailableCountries,
+  matchesCenturies,
+  matchesCountries,
+  matchesLifeStatuses,
+  matchesTiers,
+  toggleCentury,
+  toggleCountry,
+  toggleLifeStatus,
+  toggleTier,
+  type CountryMatchMode,
+  type LifeStatusOption,
+} from '../engine/filters.ts';
 
 interface GeoGuesserViewProps {
   allPeople: Person[];
@@ -65,8 +80,8 @@ export const CLUE_COSTS: Record<ClueType, number> = {
 };
 
 export const getBasePoints = (tier: Tier): number => {
-  if (tier === 'hard') return 1500;
-  if (tier === 'medium') return 1200;
+  if (tier === 'very_hard') return 1500;
+  if (tier === 'hard') return 1200;
   return 1000;
 };
 
@@ -77,14 +92,7 @@ export const getBasePoints = (tier: Tier): number => {
  */
 export const getFreeClues = (person: Person): ClueType[] => (person.deathDate ? [] : ['profile']);
 
-type TierFilter = 'easy' | 'medium' | 'hard' | 'all';
 export type LifeStatusFilter = 'historical' | 'living' | 'all';
-
-const matchesLifeStatus = (person: Person, status: LifeStatusFilter): boolean => {
-  if (status === 'historical') return !!person.deathDate;
-  if (status === 'living') return !person.deathDate;
-  return true;
-};
 
 const WRONG_GUESS_PENALTY = 100;
 const MIN_ROUND_SCORE = 100;
@@ -145,28 +153,6 @@ function getGeodesicPath(p1: [number, number], p2: [number, number], numPoints =
   return points;
 }
 
-const CENTURIES = [
-  { label: 'Alla epoker', labelEn: 'All eras', value: 'all' },
-  { label: 'Antiken & forntid (< 500)', labelEn: 'Antiquity (< 500)', value: 'antiquity' },
-  { label: '500–1200-talet', labelEn: '500–1200s', value: 'early' },
-  { label: '1300-talet', labelEn: '1300s', value: '1300' },
-  { label: '1400-talet', labelEn: '1400s', value: '1400' },
-  { label: '1500-talet', labelEn: '1500s', value: '1500' },
-  { label: '1600-talet', labelEn: '1600s', value: '1600' },
-  { label: '1700-talet', labelEn: '1700s', value: '1700' },
-  { label: '1800-talet', labelEn: '1800s', value: '1800' },
-  { label: '1900-talet', labelEn: '1900s', value: '1900' },
-  { label: '2000-talet', labelEn: '2000s', value: '2000' },
-];
-
-function matchesCentury(year: number, century: string): boolean {
-  if (century === 'all') return true;
-  if (century === 'antiquity') return year < 500;
-  if (century === 'early') return year >= 500 && year < 1300;
-  const cNum = parseInt(century, 10);
-  return year >= cNum && year < cNum + 100;
-}
-
 export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
   allPeople,
   lang,
@@ -190,28 +176,50 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     return exists ? s : null;
   });
 
-  // Filter-tillstånd: Standard är 'easy' (Lätt / Mest kända personerna) och 'historical' (Historiska / avlidna gestalter)
-  const [selectedTier, setSelectedTier] = useState<TierFilter>(() => (initialSession?.selectedTier as TierFilter) ?? 'easy');
-  const [selectedCentury, setSelectedCentury] = useState<string>(() => initialSession?.selectedCentury ?? 'all');
-  const [lifeStatus, setLifeStatus] = useState<LifeStatusFilter>(
-    () => (initialSession?.lifeStatus as LifeStatusFilter) ?? 'historical'
+  // Filter-tillstånd (flerval): Standard är ['standard'] och ['historical']
+  const [selectedTiers, setSelectedTiers] = useState<Tier[]>(() => {
+    if (initialSession?.selectedTiers?.length) return initialSession.selectedTiers as Tier[];
+    if (initialSession?.selectedTier === 'all') return ['standard', 'hard', 'very_hard'];
+    if (initialSession?.selectedTier) {
+      const mapped = initialSession.selectedTier === 'easy' ? 'standard' : initialSession.selectedTier === 'medium' ? 'hard' : initialSession.selectedTier;
+      return [mapped as Tier];
+    }
+    return ['standard'];
+  });
+  const [selectedCenturies, setSelectedCenturies] = useState<string[]>(() => {
+    if (initialSession?.selectedCenturies) return initialSession.selectedCenturies;
+    if (initialSession?.selectedCentury && initialSession.selectedCentury !== 'all') return [initialSession.selectedCentury];
+    return [];
+  });
+  const [lifeStatuses, setLifeStatuses] = useState<LifeStatusOption[]>(() => {
+    if (initialSession?.lifeStatuses?.length) return initialSession.lifeStatuses as LifeStatusOption[];
+    if (initialSession?.lifeStatus === 'all') return ['historical', 'living'];
+    if (initialSession?.lifeStatus === 'living') return ['living'];
+    return ['historical'];
+  });
+  const [selectedCountries, setSelectedCountries] = useState<string[]>(() => {
+    if (initialSession?.selectedCountries) return initialSession.selectedCountries;
+    if (initialSession?.onlySwedish) return ['Q34'];
+    return [];
+  });
+  const [countryMatchMode, setCountryMatchMode] = useState<CountryMatchMode>(
+    () => (initialSession?.countryMatchMode as CountryMatchMode) ?? 'any'
   );
-  const [onlySwedish, setOnlySwedish] = useState<boolean>(() => initialSession?.onlySwedish ?? false);
   const [requireBothCoords, setRequireBothCoords] = useState<boolean>(() => initialSession?.requireBothCoords ?? true);
 
   const eligiblePeople = useMemo(() => {
     return allPeople.filter((p) => {
-      // 1. Nivå: Lätt / Medel / Svår / Alla
-      if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
+      // 1. Nivå (flerval): Lätt / Medel / Svår
+      if (!matchesTiers(p, selectedTiers)) return false;
 
-      // 2. Århundrade / Sekel
-      if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
+      // 2. Epok / Århundrade (flerval: födelseår ELLER dödsår)
+      if (!matchesCenturies(p, selectedCenturies)) return false;
 
-      // 3. Livsstatus: Historiska (avlidna) / Nu levande / Alla
-      if (!matchesLifeStatus(p, lifeStatus)) return false;
+      // 3. Livsstatus (flerval): Historiska / Nu levande
+      if (!matchesLifeStatuses(p, lifeStatuses)) return false;
 
-      // 4. Svensk koppling
-      if (onlySwedish && !p.swedish) return false;
+      // 4. Länder (flerval med valbar kopplingstyp)
+      if (!matchesCountries(p, selectedCountries, countryMatchMode)) return false;
 
       // 5. Måste ha minst en koordinat för att kunna visas på kartan
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
@@ -221,7 +229,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
       return true;
     });
-  }, [allPeople, selectedTier, selectedCentury, lifeStatus, onlySwedish, requireBothCoords]);
+  }, [allPeople, selectedTiers, selectedCenturies, lifeStatuses, selectedCountries, countryMatchMode, requireBothCoords]);
 
   // Current person
   const [currentPerson, setCurrentPerson] = useState<Person>(() => {
@@ -302,21 +310,50 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
   });
   const [isMatchSummaryOpen, setIsMatchSummaryOpen] = useState<boolean>(() => initialSession?.isMatchSummaryOpen ?? false);
 
-  // Match setup form-tillstånd
-  const [matchCentury, setMatchCentury] = useState<string>(() => initialSession?.matchCentury ?? 'all');
-  const [matchTier, setMatchTier] = useState<TierFilter>(() => (initialSession?.matchTier as TierFilter) ?? 'easy');
-  const [matchLifeStatus, setMatchLifeStatus] = useState<LifeStatusFilter>(
-    () => (initialSession?.matchLifeStatus as LifeStatusFilter) ?? 'historical'
+  // Match setup form-tillstånd (flerval)
+  const [matchCenturies, setMatchCenturies] = useState<string[]>(() => {
+    if (initialSession?.matchCenturies) return initialSession.matchCenturies;
+    if (initialSession?.matchCentury && initialSession.matchCentury !== 'all') return [initialSession.matchCentury];
+    return [];
+  });
+  const [matchTiers, setMatchTiers] = useState<Tier[]>(() => {
+    if (initialSession?.matchTiers?.length) return initialSession.matchTiers as Tier[];
+    if (initialSession?.matchTier === 'all') return ['standard', 'hard', 'very_hard'];
+    if (initialSession?.matchTier) {
+      const mapped = initialSession.matchTier === 'easy' ? 'standard' : initialSession.matchTier === 'medium' ? 'hard' : initialSession.matchTier;
+      return [mapped as Tier];
+    }
+    return ['standard'];
+  });
+  const [matchLifeStatuses, setMatchLifeStatuses] = useState<LifeStatusOption[]>(() => {
+    if (initialSession?.matchLifeStatuses?.length) return initialSession.matchLifeStatuses as LifeStatusOption[];
+    if (initialSession?.matchLifeStatus === 'all') return ['historical', 'living'];
+    if (initialSession?.matchLifeStatus === 'living') return ['living'];
+    return ['historical'];
+  });
+  const [matchCountries, setMatchCountries] = useState<string[]>(() => {
+    if (initialSession?.matchCountries) return initialSession.matchCountries;
+    if (initialSession?.matchOnlySwedish) return ['Q34'];
+    return [];
+  });
+  const [matchCountryMatchMode, setMatchCountryMatchMode] = useState<CountryMatchMode>(
+    () => (initialSession?.matchCountryMatchMode as CountryMatchMode) ?? 'any'
   );
-  const [matchOnlySwedish, setMatchOnlySwedish] = useState<boolean>(() => initialSession?.matchOnlySwedish ?? false);
+  const [showMoreCountries, setShowMoreCountries] = useState<boolean>(false);
+  const [countrySearch, setCountrySearch] = useState<string>('');
 
   // Spara spelsession i localStorage så inte framsteg försvinner vid skärmsläckning eller flikomladdning
   useEffect(() => {
     saveGeoSession({
-      selectedTier,
-      selectedCentury,
-      lifeStatus,
-      onlySwedish,
+      selectedTier: selectedTiers.length === 3 ? 'all' : (selectedTiers[0] ?? 'standard'),
+      selectedTiers,
+      selectedCentury: selectedCenturies.length === 0 ? 'all' : selectedCenturies.join(','),
+      selectedCenturies,
+      lifeStatus: lifeStatuses.length === 2 ? 'all' : (lifeStatuses[0] ?? 'historical'),
+      lifeStatuses,
+      onlySwedish: selectedCountries.length === 1 && selectedCountries[0] === 'Q34',
+      selectedCountries,
+      countryMatchMode,
       requireBothCoords,
       showGhostPins,
       currentPersonId: currentPerson.id,
@@ -338,16 +375,22 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
         wrongGuessesCount: r.wrongGuessesCount,
       })),
       isMatchSummaryOpen,
-      matchCentury,
-      matchTier,
-      matchLifeStatus,
-      matchOnlySwedish,
+      matchCentury: matchCenturies.length === 0 ? 'all' : matchCenturies.join(','),
+      matchCenturies,
+      matchTier: matchTiers.length === 3 ? 'all' : (matchTiers[0] ?? 'standard'),
+      matchTiers,
+      matchLifeStatus: matchLifeStatuses.length === 2 ? 'all' : (matchLifeStatuses[0] ?? 'historical'),
+      matchLifeStatuses,
+      matchOnlySwedish: matchCountries.length === 1 && matchCountries[0] === 'Q34',
+      matchCountries,
+      matchCountryMatchMode,
     });
   }, [
-    selectedTier,
-    selectedCentury,
-    lifeStatus,
-    onlySwedish,
+    selectedTiers,
+    selectedCenturies,
+    lifeStatuses,
+    selectedCountries,
+    countryMatchMode,
     requireBothCoords,
     showGhostPins,
     currentPerson.id,
@@ -363,10 +406,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     currentRoundIndex,
     matchResults,
     isMatchSummaryOpen,
-    matchCentury,
-    matchTier,
-    matchLifeStatus,
-    matchOnlySwedish,
+    matchCenturies,
+    matchTiers,
+    matchLifeStatuses,
+    matchCountries,
+    matchCountryMatchMode,
   ]);
 
   // Ladda in lokala Wikipedia-sammanfattningar i bakgrunden så de finns i minnet direkt
@@ -841,83 +885,84 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     }
   }, [initialPersonId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleTierChange = (tier: TierFilter) => {
-    if (isMatchActive) return;
-    setSelectedTier(tier);
-    const candidates = allPeople.filter((p) => {
-      if (tier !== 'all' && p.tier !== tier) return false;
-      if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
-      if (!matchesLifeStatus(p, lifeStatus)) return false;
-      if (onlySwedish && !p.swedish) return false;
+  const filterPeopleWith = (
+    tiers: Tier[],
+    centuries: string[],
+    statuses: LifeStatusOption[],
+    countries: string[],
+    cMode: CountryMatchMode,
+    bothCoords: boolean
+  ) =>
+    allPeople.filter((p) => {
+      if (!matchesTiers(p, tiers)) return false;
+      if (!matchesCenturies(p, centuries)) return false;
+      if (!matchesLifeStatuses(p, statuses)) return false;
+      if (!matchesCountries(p, countries, cMode)) return false;
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
-      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
+      if (bothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
       return true;
     });
-    if (candidates.length > 0 && (tier !== 'all' && currentPerson.tier !== tier)) {
+
+  const handleTierToggle = (tier: Tier) => {
+    if (isMatchActive) return;
+    const nextTiers = toggleTier(selectedTiers, tier);
+    setSelectedTiers(nextTiers);
+    const candidates = filterPeopleWith(nextTiers, selectedCenturies, lifeStatuses, selectedCountries, countryMatchMode, requireBothCoords);
+    if (candidates.length > 0 && !matchesTiers(currentPerson, nextTiers)) {
       handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
     }
   };
 
-  const handleCenturyChange = (century: string) => {
+  const handleCenturyToggle = (century: string) => {
     if (isMatchActive) return;
-    setSelectedCentury(century);
-    const candidates = allPeople.filter((p) => {
-      if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
-      if (!matchesCentury(p.birthDate.year, century)) return false;
-      if (!matchesLifeStatus(p, lifeStatus)) return false;
-      if (onlySwedish && !p.swedish) return false;
-      if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
-      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
-      return true;
-    });
-    if (candidates.length > 0 && !matchesCentury(currentPerson.birthDate.year, century)) {
+    const nextCenturies = toggleCentury(selectedCenturies, century);
+    setSelectedCenturies(nextCenturies);
+    const candidates = filterPeopleWith(selectedTiers, nextCenturies, lifeStatuses, selectedCountries, countryMatchMode, requireBothCoords);
+    if (candidates.length > 0 && !matchesCenturies(currentPerson, nextCenturies)) {
       handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
     }
   };
 
-  const handleLifeStatusChange = (status: LifeStatusFilter) => {
+  const handleLifeStatusToggle = (status: LifeStatusOption) => {
     if (isMatchActive) return;
-    setLifeStatus(status);
-    // Om man väljer "Nu levande" och sekel-filtret är satt på före 1900-talet, nollställ sekel-filtret så det finns kandidater
-    const nextCentury =
-      status === 'living' && selectedCentury !== 'all' && selectedCentury !== '20' && selectedCentury !== '21'
-        ? 'all'
-        : selectedCentury;
-    if (nextCentury !== selectedCentury) {
-      setSelectedCentury(nextCentury);
+    const nextStatuses = toggleLifeStatus(lifeStatuses, status);
+    setLifeStatuses(nextStatuses);
+    // Om endast "Nu levande" är valt och epokfiltret bara har sekler före 1900, nollställ epokfiltret så det finns kandidater
+    const onlyLiving = nextStatuses.length === 1 && nextStatuses[0] === 'living';
+    const nextCenturies =
+      onlyLiving && selectedCenturies.length > 0 && !selectedCenturies.some((c) => c === '1900' || c === '2000')
+        ? []
+        : selectedCenturies;
+    if (nextCenturies !== selectedCenturies) {
+      setSelectedCenturies(nextCenturies);
     }
-    const candidates = allPeople.filter((p) => {
-      if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
-      if (!matchesCentury(p.birthDate.year, nextCentury)) return false;
-      if (!matchesLifeStatus(p, status)) return false;
-      if (onlySwedish && !p.swedish) return false;
-      if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
-      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
-      return true;
-    });
-    if (candidates.length > 0 && !matchesLifeStatus(currentPerson, status)) {
+    const candidates = filterPeopleWith(selectedTiers, nextCenturies, nextStatuses, selectedCountries, countryMatchMode, requireBothCoords);
+    if (candidates.length > 0 && !matchesLifeStatuses(currentPerson, nextStatuses)) {
+      handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
+    }
+  };
+
+  const handleCountryToggle = (countryId: string) => {
+    if (isMatchActive) return;
+    const nextCountries = countryId === 'all' ? [] : toggleCountry(selectedCountries, countryId);
+    setSelectedCountries(nextCountries);
+    const candidates = filterPeopleWith(selectedTiers, selectedCenturies, lifeStatuses, nextCountries, countryMatchMode, requireBothCoords);
+    if (candidates.length > 0 && !matchesCountries(currentPerson, nextCountries, countryMatchMode)) {
+      handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
+    }
+  };
+
+  const handleCountryMatchModeChange = (nextMode: CountryMatchMode) => {
+    if (isMatchActive) return;
+    setCountryMatchMode(nextMode);
+    const candidates = filterPeopleWith(selectedTiers, selectedCenturies, lifeStatuses, selectedCountries, nextMode, requireBothCoords);
+    if (candidates.length > 0 && !matchesCountries(currentPerson, selectedCountries, nextMode)) {
       handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
     }
   };
 
   const handleSwedishToggle = () => {
-    if (isMatchActive) return;
-    const nextVal = !onlySwedish;
-    setOnlySwedish(nextVal);
-    if (nextVal && !currentPerson.swedish) {
-      const candidates = allPeople.filter((p) => {
-        if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
-        if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
-        if (!matchesLifeStatus(p, lifeStatus)) return false;
-        if (!p.swedish) return false;
-        if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
-        if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
-        return true;
-      });
-      if (candidates.length > 0) {
-        handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
-      }
-    }
+    handleCountryToggle('Q34');
   };
 
   // Data helpers (behövs för att avgöra vilka ledtrådar som finns tillgängliga för aktuell person)
@@ -1081,9 +1126,9 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
           onMatchComplete?.({
             totalScore: updatedResults.reduce((acc, r) => acc + r.score, 0),
             solvedCount: updatedResults.filter((r) => r.isSolved).length,
-            tierFilter: selectedTier,
-            centuryFilter: selectedCentury,
-            swedishOnly: onlySwedish,
+            tierFilter: selectedTiers.join(','),
+            centuryFilter: selectedCenturies.length === 0 ? 'all' : selectedCenturies.join(','),
+            swedishOnly: selectedCountries.length === 1 && selectedCountries[0] === 'Q34',
             rounds: updatedResults.map((r) => ({
               personId: r.person.id,
               personName: loc(r.person.name, lang, 'Okänd'),
@@ -1137,9 +1182,9 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
         onMatchComplete?.({
           totalScore: updatedResults.reduce((acc, r) => acc + r.score, 0),
           solvedCount: updatedResults.filter((r) => r.isSolved).length,
-          tierFilter: selectedTier,
-          centuryFilter: selectedCentury,
-          swedishOnly: onlySwedish,
+          tierFilter: selectedTiers.join(','),
+          centuryFilter: selectedCenturies.length === 0 ? 'all' : selectedCenturies.join(','),
+          swedishOnly: selectedCountries.length === 1 && selectedCountries[0] === 'Q34',
           rounds: updatedResults.map((r) => ({
             personId: r.person.id,
             personName: loc(r.person.name, lang, 'Okänd'),
@@ -1154,16 +1199,14 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     setIsMobileSheetExpanded(true);
   };
 
-  const startMatch = (century: string, tier: TierFilter, status: LifeStatusFilter, swedishOnly: boolean) => {
-    const candidates = allPeople.filter((p) => {
-      if (tier !== 'all' && p.tier !== tier) return false;
-      if (!matchesCentury(p.birthDate.year, century)) return false;
-      if (!matchesLifeStatus(p, status)) return false;
-      if (swedishOnly && !p.swedish) return false;
-      if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
-      if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
-      return true;
-    });
+  const startMatch = (
+    centuries: string[],
+    tiers: Tier[],
+    statuses: LifeStatusOption[],
+    countries: string[],
+    cMode: CountryMatchMode
+  ) => {
+    const candidates = filterPeopleWith(tiers, centuries, statuses, countries, cMode, requireBothCoords);
 
     if (candidates.length < 5) {
       alert(isSv ? 'För få personer matchar filtret för en match på 5 ronder (behövs minst 5).' : 'Not enough people match the filter for a 5-round match (at least 5 needed).');
@@ -1175,10 +1218,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
     const shuffled = [...pool].sort(() => 0.5 - Math.random());
     const five = shuffled.slice(0, 5);
 
-    setSelectedCentury(century);
-    setSelectedTier(tier);
-    setLifeStatus(status);
-    setOnlySwedish(swedishOnly);
+    setSelectedCenturies(centuries);
+    setSelectedTiers(tiers);
+    setLifeStatuses(statuses);
+    setSelectedCountries(countries);
+    setCountryMatchMode(cMode);
 
     setMatchRounds(five);
     setCurrentRoundIndex(0);
@@ -1238,15 +1282,25 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
 
   const matchCandidatesCount = useMemo(() => {
     return allPeople.filter((p) => {
-      if (matchTier !== 'all' && p.tier !== matchTier) return false;
-      if (!matchesCentury(p.birthDate.year, matchCentury)) return false;
-      if (!matchesLifeStatus(p, matchLifeStatus)) return false;
-      if (matchOnlySwedish && !p.swedish) return false;
+      if (!matchesTiers(p, matchTiers)) return false;
+      if (!matchesCenturies(p, matchCenturies)) return false;
+      if (!matchesLifeStatuses(p, matchLifeStatuses)) return false;
+      if (!matchesCountries(p, matchCountries, matchCountryMatchMode)) return false;
       if (!p.birthPlace?.coord && !p.deathPlace?.coord) return false;
       if (requireBothCoords && (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate))) return false;
       return true;
     }).length;
-  }, [allPeople, matchTier, matchCentury, matchLifeStatus, matchOnlySwedish, requireBothCoords]);
+  }, [allPeople, matchTiers, matchCenturies, matchLifeStatuses, matchCountries, matchCountryMatchMode, requireBothCoords]);
+
+  const availableMatchCountries = useMemo(
+    () => extractAvailableCountries(allPeople, lang, matchCountryMatchMode),
+    [allPeople, lang, matchCountryMatchMode]
+  );
+
+  const availableFreePlayCountries = useMemo(
+    () => extractAvailableCountries(allPeople, lang, countryMatchMode),
+    [allPeople, lang, countryMatchMode]
+  );
 
   return (
     <div
@@ -1385,11 +1439,19 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                       padding: '5px 9px',
                       borderRadius: '10px',
                       background:
-                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || !requireBothCoords
+                        selectedCenturies.length > 0 ||
+                        !(selectedTiers.length === 1 && selectedTiers[0] === 'standard') ||
+                        !(lifeStatuses.length === 1 && lifeStatuses[0] === 'historical') ||
+                        selectedCountries.length > 0 ||
+                        !requireBothCoords
                           ? 'var(--accent-blue)'
                           : '#f8fafc',
                       color:
-                        selectedCentury !== 'all' || selectedTier !== 'easy' || lifeStatus !== 'historical' || onlySwedish || !requireBothCoords
+                        selectedCenturies.length > 0 ||
+                        !(selectedTiers.length === 1 && selectedTiers[0] === 'standard') ||
+                        !(lifeStatuses.length === 1 && lifeStatuses[0] === 'historical') ||
+                        selectedCountries.length > 0 ||
+                        !requireBothCoords
                           ? '#fff'
                           : 'var(--text-primary)',
                       border: '1px solid var(--border-color)',
@@ -1433,10 +1495,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                       cancelMatch();
                     }
                   } else {
-                    setMatchCentury(selectedCentury);
-                    setMatchTier(selectedTier);
-                    setMatchLifeStatus(lifeStatus);
-                    setMatchOnlySwedish(onlySwedish);
+                    setMatchCenturies(selectedCenturies);
+                    setMatchTiers(selectedTiers);
+                    setMatchLifeStatuses(lifeStatuses);
+                    setMatchCountries(selectedCountries);
+                    setMatchCountryMatchMode(countryMatchMode);
                     setShowMatchModal(true);
                   }
                 }}
@@ -1803,100 +1866,58 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               </>
             ) : (
               <>
-                {/* Svårighetsgrad: Lätt (Ikoner) / Medel (Allmänbildning) / Svår (Nisch) / Alla */}
+                {/* Svårighetsgrad (flerval utan "Alla"-knapp): Standard / Svår / Mycket svår */}
                 <div style={{ display: 'flex', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
                   <button
-                    onClick={() => handleTierChange('easy')}
+                    onClick={() => handleTierToggle('standard')}
                     style={{
                       padding: '5px 9px',
-                      background: selectedTier === 'easy' ? 'var(--accent-blue)' : '#fff',
-                      color: selectedTier === 'easy' ? '#fff' : 'var(--text-secondary)',
+                      background: selectedTiers.includes('standard') ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTiers.includes('standard') ? '#fff' : 'var(--text-secondary)',
                       border: 'none',
-                      fontWeight: selectedTier === 'easy' ? 800 : 500,
+                      fontWeight: selectedTiers.includes('standard') ? 800 : 500,
                       fontSize: '0.76rem',
                       cursor: 'pointer',
                     }}
-                    title={isSv ? 'Lätt: Mest kända personerna & ikonerna' : 'Easy: Most famous icons'}
+                    title={isSv ? 'Standard: Välkända personer & ikoner (flerval)' : 'Standard: Well-known icons & figures (multi-select)'}
                   >
-                    ⭐ {isSv ? 'Lätt' : 'Easy'}
+                    ⭐ {isSv ? 'Standard' : 'Standard'}
                   </button>
                   <button
-                    onClick={() => handleTierChange('medium')}
+                    onClick={() => handleTierToggle('hard')}
                     style={{
                       padding: '5px 9px',
-                      background: selectedTier === 'medium' ? 'var(--accent-blue)' : '#fff',
-                      color: selectedTier === 'medium' ? '#fff' : 'var(--text-secondary)',
+                      background: selectedTiers.includes('hard') ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTiers.includes('hard') ? '#fff' : 'var(--text-secondary)',
                       border: 'none',
                       borderLeft: '1px solid var(--border-color)',
-                      fontWeight: selectedTier === 'medium' ? 800 : 500,
+                      fontWeight: selectedTiers.includes('hard') ? 800 : 500,
                       fontSize: '0.76rem',
                       cursor: 'pointer',
                     }}
-                    title={isSv ? 'Medel: God allmänbildning' : 'Medium: General knowledge'}
-                  >
-                    📚 {isSv ? 'Medel' : 'Med'}
-                  </button>
-                  <button
-                    onClick={() => handleTierChange('hard')}
-                    style={{
-                      padding: '5px 9px',
-                      background: selectedTier === 'hard' ? 'var(--accent-blue)' : '#fff',
-                      color: selectedTier === 'hard' ? '#fff' : 'var(--text-secondary)',
-                      border: 'none',
-                      borderLeft: '1px solid var(--border-color)',
-                      fontWeight: selectedTier === 'hard' ? 800 : 500,
-                      fontSize: '0.76rem',
-                      cursor: 'pointer',
-                    }}
-                    title={isSv ? 'Svår: Fördjupad nisch & historia' : 'Hard: In-depth & niche'}
+                    title={isSv ? 'Svår: God allmänbildning & historia (flerval)' : 'Hard: General knowledge & history (multi-select)'}
                   >
                     🔥 {isSv ? 'Svår' : 'Hard'}
                   </button>
                   <button
-                    onClick={() => handleTierChange('all')}
+                    onClick={() => handleTierToggle('very_hard')}
                     style={{
                       padding: '5px 9px',
-                      background: selectedTier === 'all' ? 'var(--accent-blue)' : '#fff',
-                      color: selectedTier === 'all' ? '#fff' : 'var(--text-secondary)',
+                      background: selectedTiers.includes('very_hard') ? 'var(--accent-blue)' : '#fff',
+                      color: selectedTiers.includes('very_hard') ? '#fff' : 'var(--text-secondary)',
                       border: 'none',
                       borderLeft: '1px solid var(--border-color)',
-                      fontWeight: selectedTier === 'all' ? 800 : 500,
+                      fontWeight: selectedTiers.includes('very_hard') ? 800 : 500,
                       fontSize: '0.76rem',
                       cursor: 'pointer',
                     }}
-                    title={isSv ? 'Alla personer' : 'All people'}
+                    title={isSv ? 'Mycket svår: Fördjupad nisch & historia (väljer alla 3 från start, klicka för att avmarkera)' : 'Very Hard: In-depth niche & history'}
                   >
-                    {isSv ? 'Alla' : 'All'}
+                    ⚡ {isSv ? 'Mycket svår' : 'Very Hard'}
                   </button>
                 </div>
 
-                {/* Århundrade / Sekel Dropdown */}
-                <div style={{ display: 'flex', alignItems: 'center' }}>
-                  <select
-                    value={selectedCentury}
-                    onChange={(e) => handleCenturyChange(e.target.value)}
-                    style={{
-                      padding: '5px 8px',
-                      borderRadius: '6px',
-                      border: '1px solid var(--border-color)',
-                      background: selectedCentury !== 'all' ? 'var(--tag-bg)' : '#fff',
-                      color: 'var(--text-primary)',
-                      fontWeight: 700,
-                      fontSize: '0.76rem',
-                      cursor: 'pointer',
-                      outline: 'none',
-                    }}
-                    title={isSv ? 'Filtrera på personens födelsesekel' : 'Filter by birth century'}
-                  >
-                    {CENTURIES.map((c) => (
-                      <option key={c.value} value={c.value}>
-                        {isSv ? c.label : c.labelEn}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Livsstatus / Spelläge: Historiska (standard) vs Nu levande */}
+                {/* Livsstatus / Spelläge (flerval utan "Båda"-knapp): Historiska & Nu levande */}
                 <div
                   style={{
                     display: 'inline-flex',
@@ -1907,87 +1928,110 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   }}
                 >
                   <button
-                    onClick={() => handleLifeStatusChange('historical')}
+                    onClick={() => handleLifeStatusToggle('historical')}
                     style={{
                       padding: '5px 9px',
-                      background: lifeStatus === 'historical' ? '#7c2d12' : '#fff',
-                      color: lifeStatus === 'historical' ? '#fff' : 'var(--text-secondary)',
+                      background: lifeStatuses.includes('historical') ? '#7c2d12' : '#fff',
+                      color: lifeStatuses.includes('historical') ? '#fff' : 'var(--text-secondary)',
                       border: 'none',
-                      fontWeight: lifeStatus === 'historical' ? 800 : 500,
+                      fontWeight: lifeStatuses.includes('historical') ? 800 : 500,
                       fontSize: '0.76rem',
                       cursor: 'pointer',
                     }}
-                    title={isSv ? 'Endast historiska (avlidna) personer med komplett livsresa' : 'Only historical (deceased) figures with complete life journeys'}
+                    title={isSv ? 'Historiska (avlidna) personer – kan kombineras med Nu levande' : 'Historical (deceased) figures – can combine with Living'}
                   >
                     🏛️ {isSv ? 'Historiska' : 'Historical'}
                   </button>
                   <button
-                    onClick={() => handleLifeStatusChange('living')}
+                    onClick={() => handleLifeStatusToggle('living')}
                     style={{
                       padding: '5px 9px',
-                      background: lifeStatus === 'living' ? '#be123c' : '#fff',
-                      color: lifeStatus === 'living' ? '#fff' : 'var(--text-secondary)',
+                      background: lifeStatuses.includes('living') ? '#be123c' : '#fff',
+                      color: lifeStatuses.includes('living') ? '#fff' : 'var(--text-secondary)',
                       border: 'none',
                       borderLeft: '1px solid var(--border-color)',
-                      fontWeight: lifeStatus === 'living' ? 800 : 500,
+                      fontWeight: lifeStatuses.includes('living') ? 800 : 500,
                       fontSize: '0.76rem',
                       cursor: 'pointer',
                     }}
-                    title={isSv ? 'Endast nu levande personer (Profil-ledtråd gratis!)' : 'Only living people (free Profile clue!)'}
+                    title={isSv ? 'Nu levande personer – kan kombineras med Historiska' : 'Living people – can combine with Historical'}
                   >
                     🌟 {isSv ? 'Nu levande' : 'Living'}
                   </button>
-                  <button
-                    onClick={() => handleLifeStatusChange('all')}
-                    style={{
-                      padding: '5px 8px',
-                      background: lifeStatus === 'all' ? 'var(--accent-blue)' : '#fff',
-                      color: lifeStatus === 'all' ? '#fff' : 'var(--text-secondary)',
-                      border: 'none',
-                      borderLeft: '1px solid var(--border-color)',
-                      fontWeight: lifeStatus === 'all' ? 800 : 500,
-                      fontSize: '0.76rem',
-                      cursor: 'pointer',
-                    }}
-                    title={isSv ? 'Både historiska och nu levande' : 'Both historical and living'}
-                  >
-                    {isSv ? 'Båda' : 'Both'}
-                  </button>
                 </div>
 
-                {/* Svensk filter-knapp */}
+                {/* Snabbknapp för Sverige + Fler epoker & länder */}
                 <button
                   onClick={handleSwedishToggle}
                   style={{
                     padding: '5px 9px',
                     borderRadius: '6px',
-                    border: onlySwedish ? '1px solid #137333' : '1px solid var(--border-color)',
-                    background: onlySwedish ? '#e6f4ea' : '#fff',
-                    color: onlySwedish ? '#137333' : 'var(--text-secondary)',
+                    border: selectedCountries.includes('Q34') ? '1px solid #137333' : '1px solid var(--border-color)',
+                    background: selectedCountries.includes('Q34') ? '#e6f4ea' : '#fff',
+                    color: selectedCountries.includes('Q34') ? '#137333' : 'var(--text-secondary)',
                     fontWeight: 700,
                     fontSize: '0.76rem',
                     cursor: 'pointer',
                   }}
-                  title={isSv ? 'Bara personer med svensk koppling' : 'Only Swedish people'}
+                  title={isSv ? 'Växla Sverige i landfiltret' : 'Toggle Sweden in country filter'}
                 >
                   🇸🇪 {isSv ? 'Sverige' : 'Sweden'}
                 </button>
 
-                {/* Hel resa filter-knapp (döljs i läget "Nu levande") */}
-                {lifeStatus !== 'living' && (
+                <button
+                  onClick={() => setShowMobileFilterModal(true)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '5px 9px',
+                    borderRadius: '6px',
+                    border:
+                      selectedCenturies.length > 0 || selectedCountries.some((c) => c !== 'Q34') || selectedCountries.length > 1
+                        ? '1.5px solid var(--accent-blue)'
+                        : '1px solid var(--border-color)',
+                    background:
+                      selectedCenturies.length > 0 || selectedCountries.some((c) => c !== 'Q34') || selectedCountries.length > 1
+                        ? '#eff6ff'
+                        : '#fff',
+                    color:
+                      selectedCenturies.length > 0 || selectedCountries.some((c) => c !== 'Q34') || selectedCountries.length > 1
+                        ? 'var(--accent-blue)'
+                        : 'var(--text-primary)',
+                    fontWeight: 700,
+                    fontSize: '0.76rem',
+                    cursor: 'pointer',
+                  }}
+                  title={isSv ? 'Välj flera epoker (födelse-/dödsår) och länder' : 'Select multiple epochs and countries'}
+                >
+                  <SlidersHorizontal size={13} />
+                  <span>
+                    {selectedCenturies.length > 0
+                      ? `${selectedCenturies.length} ${isSv ? 'epoker' : 'eras'}`
+                      : isSv
+                      ? 'Alla epoker'
+                      : 'All eras'}
+                    {selectedCountries.length > 0
+                      ? ` · ${selectedCountries.length} ${isSv ? 'land' : 'country'}`
+                      : ''}
+                  </span>
+                </button>
+
+                {/* Hel resa filter-knapp (döljs om endast "Nu levande" är valt) */}
+                {!(lifeStatuses.length === 1 && lifeStatuses[0] === 'living') && (
                   <button
                     onClick={() => {
                       const nextVal = !requireBothCoords;
                       setRequireBothCoords(nextVal);
                       if (nextVal && (!currentPerson.birthPlace?.coord || (!currentPerson.deathPlace?.coord && currentPerson.deathDate))) {
-                        const candidates = allPeople.filter((p) => {
-                          if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
-                          if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
-                          if (!matchesLifeStatus(p, lifeStatus)) return false;
-                          if (onlySwedish && !p.swedish) return false;
-                          if (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate)) return false;
-                          return true;
-                        });
+                        const candidates = filterPeopleWith(
+                          selectedTiers,
+                          selectedCenturies,
+                          lifeStatuses,
+                          selectedCountries,
+                          countryMatchMode,
+                          nextVal
+                        );
                         if (candidates.length > 0) {
                           handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
                         }
@@ -2040,10 +2084,11 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                 {/* Spela match-knapp */}
                 <button
                   onClick={() => {
-                    setMatchCentury(selectedCentury);
-                    setMatchTier(selectedTier);
-                    setMatchLifeStatus(lifeStatus);
-                    setMatchOnlySwedish(onlySwedish);
+                    setMatchCenturies(selectedCenturies);
+                    setMatchTiers(selectedTiers);
+                    setMatchLifeStatuses(lifeStatuses);
+                    setMatchCountries(selectedCountries);
+                    setMatchCountryMatchMode(countryMatchMode);
                     setShowMatchModal(true);
                   }}
                   style={{
@@ -3632,13 +3677,15 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             style={{
               background: '#fff',
               borderRadius: '20px',
-              maxWidth: '460px',
+              maxWidth: '500px',
               width: '100%',
-              padding: '24px',
+              maxHeight: '92dvh',
+              overflowY: 'auto',
+              padding: '22px',
               boxShadow: '0 24px 60px rgba(0, 0, 0, 0.3)',
               display: 'flex',
               flexDirection: 'column',
-              gap: '18px',
+              gap: '16px',
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -3664,7 +3711,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                     {isSv ? 'Starta en Match (5 gåtor)' : 'Start a Match (5 rounds)'}
                   </h3>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    {isSv ? 'Gissa 5 historiska personer och samla upp till 5 000–7 500 poäng' : 'Guess 5 figures and collect up to 5,000–7,500 points'}
+                    {isSv ? 'Gissa 5 personer och samla upp till 5 000–7 500 poäng' : 'Guess 5 figures and collect up to 5,000–7,500 points'}
                   </div>
                 </div>
               </div>
@@ -3676,199 +3723,461 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               </button>
             </div>
 
-            {/* Filter-sektion */}
+            {/* Filter-sektion (Flerval i alla kategorier) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', background: '#fcfaf6', padding: '16px', borderRadius: '12px', border: '1px solid #f0e9dc' }}>
-              {/* Spelläge: Historiska vs Nu levande */}
+              {/* 1. Spelläge: Historiska / Nu levande (Flerval utan "Båda"-ruta) */}
               <div>
-                <label style={{ display: 'block', fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                  🏛️ {isSv ? 'Personkategori / Spelläge' : 'Figure Type / Game Mode'}
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
-                  <button
-                    type="button"
-                    onClick={() => setMatchLifeStatus('historical')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchLifeStatus === 'historical' ? '1.5px solid #7c2d12' : '1px solid var(--border-color)',
-                      background: matchLifeStatus === 'historical' ? '#ffedd5' : '#fff',
-                      color: matchLifeStatus === 'historical' ? '#7c2d12' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🏛️ {isSv ? 'Historiska' : 'Historical'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMatchLifeStatus('living');
-                      if (matchCentury !== 'all' && matchCentury !== '20' && matchCentury !== '21') {
-                        setMatchCentury('all');
-                      }
-                    }}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchLifeStatus === 'living' ? '1.5px solid #be123c' : '1px solid var(--border-color)',
-                      background: matchLifeStatus === 'living' ? '#ffe4e6' : '#fff',
-                      color: matchLifeStatus === 'living' ? '#be123c' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🌟 {isSv ? 'Nu levande' : 'Living'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMatchLifeStatus('all')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchLifeStatus === 'all' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchLifeStatus === 'all' ? '#e0f2fe' : '#fff',
-                      color: matchLifeStatus === 'all' ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🎲 {isSv ? 'Båda' : 'Both'}
-                  </button>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                    🏛️ {isSv ? 'Personkategori / Spelläge' : 'Figure Type / Game Mode'}
+                  </label>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                    {isSv ? 'Välj en eller båda' : 'Select one or both'}
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+                  {([
+                    {
+                      id: 'historical' as LifeStatusOption,
+                      label: isSv ? 'Historiska' : 'Historical',
+                      icon: '🏛️',
+                      activeBorder: '#7c2d12',
+                      activeBg: '#ffedd5',
+                      activeColor: '#7c2d12',
+                    },
+                    {
+                      id: 'living' as LifeStatusOption,
+                      label: isSv ? 'Nu levande' : 'Living',
+                      icon: '🌟',
+                      activeBorder: '#be123c',
+                      activeBg: '#ffe4e6',
+                      activeColor: '#be123c',
+                    },
+                  ]).map((opt) => {
+                    const active = matchLifeStatuses.includes(opt.id);
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          const next = toggleLifeStatus(matchLifeStatuses, opt.id);
+                          setMatchLifeStatuses(next);
+                          const onlyLiving = next.length === 1 && next[0] === 'living';
+                          if (onlyLiving && matchCenturies.length > 0 && !matchCenturies.some((c) => c === '1900' || c === '2000')) {
+                            setMatchCenturies([]);
+                          }
+                        }}
+                        style={{
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          border: active ? `1.5px solid ${opt.activeBorder}` : '1px solid var(--border-color)',
+                          background: active ? opt.activeBg : '#fff',
+                          color: active ? opt.activeColor : 'var(--text-secondary)',
+                          fontWeight: 700,
+                          fontSize: '0.78rem',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '6px',
+                        }}
+                      >
+                        <span>
+                          {opt.icon} {opt.label}
+                        </span>
+                        <span
+                          style={{
+                            width: '16px',
+                            height: '16px',
+                            borderRadius: '4px',
+                            border: active ? `1.5px solid ${opt.activeBorder}` : '1px solid #cbd5e1',
+                            background: active ? opt.activeBorder : '#fff',
+                            color: '#fff',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.66rem',
+                            fontWeight: 900,
+                          }}
+                        >
+                          {active ? '✓' : ''}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Århundrade */}
+              {/* 2. Epok / Århundrade (Flerval: födelseår ELLER dödsår) */}
               <div>
-                <label style={{ display: 'block', fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                  ⏳ {isSv ? 'Tidsperiod / Århundrade' : 'Century / Epoch'}
-                </label>
-                <select
-                  value={matchCentury}
-                  onChange={(e) => setMatchCentury(e.target.value)}
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px', gap: '6px' }}>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                    ⏳ {isSv ? 'Epok / Århundrade' : 'Epoch / Century'}
+                  </label>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                    {isSv ? 'Födelse- eller dödsår (flerval)' : 'Birth or death year (multi-select)'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setMatchCenturies([])}
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: '7px',
+                      border: matchCenturies.length === 0 ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                      background: matchCenturies.length === 0 ? '#e0f2fe' : '#fff',
+                      color: matchCenturies.length === 0 ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.73rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {isSv ? 'Alla epoker' : 'All eras'}
+                  </button>
+                  {CENTURY_OPTIONS.map((c) => {
+                    const active = matchCenturies.includes(c.value);
+                    return (
+                      <button
+                        key={c.value}
+                        type="button"
+                        onClick={() => setMatchCenturies((prev) => toggleCentury(prev, c.value))}
+                        style={{
+                          padding: '5px 9px',
+                          borderRadius: '7px',
+                          border: active ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                          background: active ? '#e0f2fe' : '#fff',
+                          color: active ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                          fontWeight: 700,
+                          fontSize: '0.73rem',
+                          cursor: 'pointer',
+                        }}
+                        title={isSv ? c.label : c.labelEn}
+                      >
+                        {isSv ? c.shortLabel : c.shortLabelEn}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 3. Svårighetsgrad (Flerval utan "Alla"-knapp; klick på Svår från Lätt väljer alla 3) */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                    🎯 {isSv ? 'Svårighetsgrad / Urval' : 'Difficulty / Tier'}
+                  </label>
+                  <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                    {isSv ? 'Flerval – klicka för att kombinera' : 'Multi-select'}
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                  {([
+                    { id: 'standard' as Tier, label: isSv ? 'Standard' : 'Standard', icon: '⭐' },
+                    { id: 'hard' as Tier, label: isSv ? 'Svår' : 'Hard', icon: '🔥' },
+                    { id: 'very_hard' as Tier, label: isSv ? 'Mycket svår' : 'Very Hard', icon: '⚡' },
+                  ]).map((t) => {
+                    const active = matchTiers.includes(t.id);
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setMatchTiers((prev) => toggleTier(prev, t.id))}
+                        style={{
+                          padding: '8px 8px',
+                          borderRadius: '8px',
+                          border: active ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                          background: active ? '#e0f2fe' : '#fff',
+                          color: active ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                          fontWeight: 700,
+                          fontSize: '0.76rem',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '4px',
+                        }}
+                      >
+                        <span>
+                          {t.icon} {t.label}
+                        </span>
+                        <span
+                          style={{
+                            width: '15px',
+                            height: '15px',
+                            borderRadius: '4px',
+                            border: active ? '1.5px solid var(--accent-blue)' : '1px solid #cbd5e1',
+                            background: active ? 'var(--accent-blue)' : '#fff',
+                            color: '#fff',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.64rem',
+                            fontWeight: 900,
+                          }}
+                        >
+                          {active ? '✓' : ''}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 4. Länder & Geografisk koppling (Flerval + tydlig definition av vad land innebär) */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                    🌍 {isSv ? 'Länder (Flerval)' : 'Countries (Multi-select)'}
+                  </label>
+                  {matchCountries.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setMatchCountries([])}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--accent-blue)',
+                        fontSize: '0.7rem',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        padding: 0,
+                      }}
+                    >
+                      {isSv ? `Rensa (${matchCountries.length})` : `Clear (${matchCountries.length})`}
+                    </button>
+                  )}
+                </div>
+
+                {/* Snabbval för länder */}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setMatchCountries([])}
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: '7px',
+                      border: matchCountries.length === 0 ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                      background: matchCountries.length === 0 ? '#e0f2fe' : '#fff',
+                      color: matchCountries.length === 0 ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                      fontWeight: 700,
+                      fontSize: '0.73rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🌍 {isSv ? 'Alla länder' : 'All countries'}
+                  </button>
+
+                  {(() => {
+                    const quickSet = new Set<string>(QUICK_COUNTRY_IDS);
+                    const displayed = availableMatchCountries.filter(
+                      (c) => quickSet.has(c.id) || matchCountries.includes(c.id)
+                    );
+                    return displayed.map((c) => {
+                      const active = matchCountries.includes(c.id);
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setMatchCountries((prev) => toggleCountry(prev, c.id))}
+                          style={{
+                            padding: '5px 9px',
+                            borderRadius: '7px',
+                            border: active ? '1.5px solid #137333' : '1px solid var(--border-color)',
+                            background: active ? '#e6f4ea' : '#fff',
+                            color: active ? '#137333' : 'var(--text-secondary)',
+                            fontWeight: 700,
+                            fontSize: '0.73rem',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                          }}
+                        >
+                          <span>{c.flag}</span>
+                          <span>{c.label}</span>
+                        </button>
+                      );
+                    });
+                  })()}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowMoreCountries((v) => !v)}
+                    style={{
+                      padding: '5px 9px',
+                      borderRadius: '7px',
+                      border: '1px dashed var(--accent-blue)',
+                      background: showMoreCountries ? '#eff6ff' : '#fff',
+                      color: 'var(--accent-blue)',
+                      fontWeight: 700,
+                      fontSize: '0.73rem',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {showMoreCountries
+                      ? isSv
+                        ? '▲ Dölj landlista'
+                        : '▲ Hide country list'
+                      : isSv
+                      ? `➕ Fler länder (${availableMatchCountries.length})...`
+                      : `➕ More countries (${availableMatchCountries.length})...`}
+                  </button>
+                </div>
+
+                {/* Expanderbar sökbar lista med alla länder i databasen */}
+                {showMoreCountries && (
+                  <div
+                    style={{
+                      marginTop: '8px',
+                      padding: '8px',
+                      borderRadius: '8px',
+                      background: '#fff',
+                      border: '1px solid var(--border-color)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '6px',
+                    }}
+                  >
+                    <input
+                      type="text"
+                      value={countrySearch}
+                      onChange={(e) => setCountrySearch(e.target.value)}
+                      placeholder={isSv ? 'Sök bland alla länder/riken...' : 'Search all countries/empires...'}
+                      style={{
+                        width: '100%',
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--border-color)',
+                        fontSize: '0.76rem',
+                        outline: 'none',
+                      }}
+                    />
+                    <div
+                      style={{
+                        maxHeight: '150px',
+                        overflowY: 'auto',
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '4px',
+                      }}
+                    >
+                      {availableMatchCountries
+                        .filter((c) => !countrySearch.trim() || c.label.toLowerCase().includes(countrySearch.toLowerCase()))
+                        .map((c) => {
+                          const active = matchCountries.includes(c.id);
+                          return (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => setMatchCountries((prev) => toggleCountry(prev, c.id))}
+                              style={{
+                                padding: '4px 8px',
+                                borderRadius: '6px',
+                                border: active ? '1.5px solid #137333' : '1px solid #e2e8f0',
+                                background: active ? '#e6f4ea' : '#f8fafc',
+                                color: active ? '#137333' : 'var(--text-primary)',
+                                fontWeight: active ? 700 : 600,
+                                fontSize: '0.72rem',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {c.flag} {c.label} <span style={{ opacity: 0.65 }}>({c.count})</span>
+                            </button>
+                          );
+                        })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Tydlig förklaring och val av vad landkoppling betyder */}
+                <div
                   style={{
-                    width: '100%',
+                    marginTop: '8px',
                     padding: '8px 10px',
                     borderRadius: '8px',
-                    border: '1px solid var(--border-color)',
-                    background: '#fff',
-                    fontWeight: 600,
-                    fontSize: '0.82rem',
-                    color: 'var(--text-primary)',
-                    cursor: 'pointer',
+                    background: '#f8fafc',
+                    border: '1px solid #e2e8f0',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
                   }}
                 >
-                  {CENTURIES.map((c) => (
-                    <option key={c.value} value={c.value}>
-                      {isSv ? c.label : c.labelEn}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Svårighetsgrad */}
-              <div>
-                <label style={{ display: 'block', fontSize: '0.76rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                  🎯 {isSv ? 'Svårighetsgrad / Urval' : 'Difficulty / Tier'}
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
-                  <button
-                    type="button"
-                    onClick={() => setMatchTier('easy')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchTier === 'easy' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchTier === 'easy' ? '#e0f2fe' : '#fff',
-                      color: matchTier === 'easy' ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ⭐ {isSv ? 'Lätt' : 'Easy'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMatchTier('medium')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchTier === 'medium' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchTier === 'medium' ? '#e0f2fe' : '#fff',
-                      color: matchTier === 'medium' ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    📚 {isSv ? 'Medel' : 'Med'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMatchTier('hard')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchTier === 'hard' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchTier === 'hard' ? '#e0f2fe' : '#fff',
-                      color: matchTier === 'hard' ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🔥 {isSv ? 'Svår' : 'Hard'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMatchTier('all')}
-                    style={{
-                      padding: '7px 4px',
-                      borderRadius: '8px',
-                      border: matchTier === 'all' ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                      background: matchTier === 'all' ? '#e0f2fe' : '#fff',
-                      color: matchTier === 'all' ? 'var(--accent-blue)' : 'var(--text-secondary)',
-                      fontWeight: 700,
-                      fontSize: '0.74rem',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🎲 {isSv ? 'Alla' : 'All'}
-                  </button>
+                  <div style={{ fontSize: '0.71rem', fontWeight: 700, color: '#475569' }}>
+                    {isSv ? 'Vad innebär koppling till valt land?' : 'What does country connection mean?'}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
+                    {([
+                      { id: 'any' as CountryMatchMode, label: isSv ? 'Alla' : 'Any', icon: '🔗' },
+                      { id: 'citizenship' as CountryMatchMode, label: isSv ? 'Medborgare' : 'Citizen', icon: '🪪' },
+                      { id: 'birth' as CountryMatchMode, label: isSv ? 'Född i' : 'Born in', icon: '🐣' },
+                      { id: 'death' as CountryMatchMode, label: isSv ? 'Död i' : 'Died in', icon: '🪦' },
+                    ]).map((m) => {
+                      const active = matchCountryMatchMode === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setMatchCountryMatchMode(m.id)}
+                          style={{
+                            padding: '5px 4px',
+                            borderRadius: '6px',
+                            border: active ? '1.5px solid var(--accent-blue)' : '1px solid #cbd5e1',
+                            background: active ? '#e0f2fe' : '#fff',
+                            color: active ? 'var(--accent-blue)' : '#475569',
+                            fontWeight: 700,
+                            fontSize: '0.69rem',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {m.icon} {m.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: '0.69rem', color: '#64748b', lineHeight: 1.35 }}>
+                    {matchCountryMatchMode === 'any' &&
+                      (isSv
+                        ? 'Träffar personer som var medborgare i landet, föddes där eller dog där (inkl. historiska riken).'
+                        : 'Matches people who were citizens of, born in, or died in the country (incl. historical states).')}
+                    {matchCountryMatchMode === 'citizenship' &&
+                      (isSv
+                        ? 'Träffar endast personer med registrerat medborgarskap/nationalitet i landet i Wikidata (så fungerade Sverige-valet tidigare).'
+                        : 'Matches only people with recorded citizenship/nationality in the country in Wikidata.')}
+                    {matchCountryMatchMode === 'birth' &&
+                      (isSv
+                        ? 'Träffar endast personer vars födelseort ligger i landet.'
+                        : 'Matches only people whose birthplace is located in the country.')}
+                    {matchCountryMatchMode === 'death' &&
+                      (isSv
+                        ? 'Träffar endast personer vars dödsort ligger i landet.'
+                        : 'Matches only people whose place of death is located in the country.')}
+                  </div>
                 </div>
               </div>
 
-              {/* Geografi: Endast Sverige toggle */}
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                <input
-                  type="checkbox"
-                  checked={matchOnlySwedish}
-                  onChange={(e) => setMatchOnlySwedish(e.target.checked)}
-                  style={{ width: '16px', height: '16px', accentColor: 'var(--accent-blue)', cursor: 'pointer' }}
-                />
-                🇸🇪 {isSv ? 'Endast personer med svensk koppling' : 'Only Swedish historical figures'}
-              </label>
-
               {/* Kandidaträknare */}
-              <div style={{ fontSize: '0.72rem', color: matchCandidatesCount >= 5 ? 'var(--text-muted)' : '#c62828', fontWeight: 600 }}>
+              <div style={{ fontSize: '0.74rem', color: matchCandidatesCount >= 5 ? 'var(--text-muted)' : '#c62828', fontWeight: 700 }}>
                 {matchCandidatesCount >= 5
-                  ? (isSv ? `✨ ${matchCandidatesCount} personer matchar dina val` : `✨ ${matchCandidatesCount} people available`)
-                  : (isSv ? '⚠️ För få personer matchar (minst 5 krävs). Ändra filter.' : '⚠️ Less than 5 people match. Broaden filters.')}
+                  ? isSv
+                    ? `✨ ${matchCandidatesCount} personer matchar dina val`
+                    : `✨ ${matchCandidatesCount} people available`
+                  : isSv
+                  ? '⚠️ För få personer matchar (minst 5 krävs). Bredda dina val.'
+                  : '⚠️ Less than 5 people match. Broaden filters.'}
               </div>
             </div>
 
             {/* Poänginfo */}
             <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
-              💡 {isSv
+              💡{' '}
+              {isSv
                 ? 'Varje gåta ger 1 000–1 500 baspoäng beroende på svårighetsgrad. Att öppna ledtrådar (-50 till -350p) eller gissa fel (-100p) ger avdrag.'
                 : 'Each round awards 1,000–1,500 base points depending on difficulty. Clues and wrong guesses deduct points.'}
             </div>
 
             {/* Knappar */}
-            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
               <button
                 type="button"
                 onClick={() => setShowMatchModal(false)}
@@ -3889,7 +4198,15 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               <button
                 type="button"
                 disabled={matchCandidatesCount < 5}
-                onClick={() => startMatch(matchCentury, matchTier, matchLifeStatus, matchOnlySwedish)}
+                onClick={() =>
+                  startMatch(
+                    matchCenturies,
+                    matchTiers,
+                    matchLifeStatuses,
+                    matchCountries,
+                    matchCountryMatchMode
+                  )
+                }
                 style={{
                   flex: 2,
                   padding: '9px',
@@ -4148,7 +4465,7 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
         </div>
       )}
 
-      {/* 7. MOBIL FILTER-MODAL */}
+      {/* 7. FILTER-MODAL (MOBIL & DESKTOP FRISPEL) */}
       {showMobileFilterModal && (
         <div
           style={{
@@ -4158,23 +4475,24 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
             background: 'rgba(0, 0, 0, 0.6)',
             backdropFilter: 'blur(6px)',
             display: 'flex',
-            alignItems: 'flex-end',
+            alignItems: isMobile ? 'flex-end' : 'center',
             justifyContent: 'center',
+            padding: isMobile ? 0 : '16px',
           }}
           onClick={() => setShowMobileFilterModal(false)}
         >
           <div
             style={{
               background: '#fff',
-              borderRadius: '20px 20px 0 0',
+              borderRadius: isMobile ? '20px 20px 0 0' : '20px',
               width: '100%',
               maxWidth: '500px',
-              padding: '20px 18px calc(20px + env(safe-area-inset-bottom, 0px))',
+              padding: isMobile ? '20px 18px calc(20px + env(safe-area-inset-bottom, 0px))' : '22px',
               boxShadow: '0 -10px 40px rgba(0,0,0,0.25)',
               display: 'flex',
               flexDirection: 'column',
               gap: '14px',
-              maxHeight: '85dvh',
+              maxHeight: '88dvh',
               overflowY: 'auto',
             }}
             onClick={(e) => e.stopPropagation()}
@@ -4201,182 +4519,428 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
               </button>
             </div>
 
-            {/* Livsstatus / Spelläge */}
+            {/* 1. Livsstatus / Spelläge (Flerval utan Båda-ruta) */}
             <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                {isSv ? 'Personkategori / Spelläge:' : 'Figure Type / Game Mode:'}
-              </label>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                  🏛️ {isSv ? 'Personkategori / Spelläge:' : 'Figure Type / Game Mode:'}
+                </label>
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  {isSv ? 'Välj en eller båda' : 'Select one or both'}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+                {([
+                  {
+                    id: 'historical' as LifeStatusOption,
+                    label: isSv ? 'Historiska' : 'Historical',
+                    icon: '🏛️',
+                    activeBorder: '#7c2d12',
+                    activeBg: '#ffedd5',
+                    activeColor: '#7c2d12',
+                  },
+                  {
+                    id: 'living' as LifeStatusOption,
+                    label: isSv ? 'Nu levande' : 'Living',
+                    icon: '🌟',
+                    activeBorder: '#be123c',
+                    activeBg: '#ffe4e6',
+                    activeColor: '#be123c',
+                  },
+                ]).map((opt) => {
+                  const active = lifeStatuses.includes(opt.id);
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => handleLifeStatusToggle(opt.id)}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '8px',
+                        border: active ? `2px solid ${opt.activeBorder}` : '1px solid var(--border-color)',
+                        background: active ? opt.activeBg : '#fff',
+                        color: active ? opt.activeColor : 'var(--text-primary)',
+                        fontWeight: 700,
+                        fontSize: '0.78rem',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>
+                        {opt.icon} {opt.label}
+                      </span>
+                      <span
+                        style={{
+                          width: '16px',
+                          height: '16px',
+                          borderRadius: '4px',
+                          border: active ? `1.5px solid ${opt.activeBorder}` : '1px solid #cbd5e1',
+                          background: active ? opt.activeBorder : '#fff',
+                          color: '#fff',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: '0.66rem',
+                          fontWeight: 900,
+                        }}
+                      >
+                        {active ? '✓' : ''}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 2. Epok / Århundrade (Flerval: födelseår ELLER dödsår) */}
+            <div>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                  ⏳ {isSv ? 'Epok / Århundrade:' : 'Epoch / Century:'}
+                </label>
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  {isSv ? 'Födelse- eller dödsår (flerval)' : 'Birth or death year (multi-select)'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                <button
+                  type="button"
+                  onClick={() => handleCenturyToggle('all')}
+                  style={{
+                    padding: '6px 10px',
+                    borderRadius: '7px',
+                    border: selectedCenturies.length === 0 ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: selectedCenturies.length === 0 ? '#e0f2fe' : '#fff',
+                    color: selectedCenturies.length === 0 ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                    fontWeight: 700,
+                    fontSize: '0.75rem',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {isSv ? 'Alla epoker' : 'All eras'}
+                </button>
+                {CENTURY_OPTIONS.map((c) => {
+                  const active = selectedCenturies.includes(c.value);
+                  return (
+                    <button
+                      key={c.value}
+                      type="button"
+                      onClick={() => handleCenturyToggle(c.value)}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: '7px',
+                        border: active ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                        background: active ? '#e0f2fe' : '#fff',
+                        color: active ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                        fontWeight: 700,
+                        fontSize: '0.75rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {isSv ? c.shortLabel : c.shortLabelEn}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 3. Svårighetsgrad (Flerval utan Alla-knapp) */}
+            <div>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                  🎯 {isSv ? 'Svårighetsgrad:' : 'Difficulty tier:'}
+                </label>
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                  {isSv ? 'Flerval' : 'Multi-select'}
+                </span>
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
-                <button
-                  type="button"
-                  onClick={() => handleLifeStatusChange('historical')}
-                  style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: lifeStatus === 'historical' ? '2px solid #7c2d12' : '1px solid var(--border-color)',
-                    background: lifeStatus === 'historical' ? '#ffedd5' : '#fff',
-                    color: lifeStatus === 'historical' ? '#7c2d12' : 'var(--text-primary)',
-                    fontWeight: 700,
-                    fontSize: '0.74rem',
-                    textAlign: 'center',
-                  }}
-                >
-                  🏛️ {isSv ? 'Historiska' : 'Historical'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleLifeStatusChange('living')}
-                  style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: lifeStatus === 'living' ? '2px solid #be123c' : '1px solid var(--border-color)',
-                    background: lifeStatus === 'living' ? '#ffe4e6' : '#fff',
-                    color: lifeStatus === 'living' ? '#be123c' : 'var(--text-primary)',
-                    fontWeight: 700,
-                    fontSize: '0.74rem',
-                    textAlign: 'center',
-                  }}
-                >
-                  🌟 {isSv ? 'Nu levande' : 'Living'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleLifeStatusChange('all')}
-                  style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: lifeStatus === 'all' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: lifeStatus === 'all' ? 'var(--tag-bg)' : '#fff',
-                    color: lifeStatus === 'all' ? 'var(--accent-blue)' : 'var(--text-primary)',
-                    fontWeight: 700,
-                    fontSize: '0.74rem',
-                    textAlign: 'center',
-                  }}
-                >
-                  🎲 {isSv ? 'Båda' : 'Both'}
-                </button>
+                {([
+                  { id: 'standard' as Tier, label: isSv ? 'Standard' : 'Standard', icon: '⭐' },
+                  { id: 'hard' as Tier, label: isSv ? 'Svår' : 'Hard', icon: '🔥' },
+                  { id: 'very_hard' as Tier, label: isSv ? 'Mycket svår' : 'Very Hard', icon: '⚡' },
+                ]).map((t) => {
+                  const active = selectedTiers.includes(t.id);
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => handleTierToggle(t.id)}
+                      style={{
+                        padding: '8px 8px',
+                        borderRadius: '8px',
+                        border: active ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                        background: active ? 'var(--tag-bg)' : '#fff',
+                        color: active ? 'var(--accent-blue)' : 'var(--text-primary)',
+                        fontWeight: 700,
+                        fontSize: '0.76rem',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>
+                        {t.icon} {t.label}
+                      </span>
+                      <span
+                        style={{
+                          width: '15px',
+                          height: '15px',
+                          borderRadius: '4px',
+                          border: active ? '1.5px solid var(--accent-blue)' : '1px solid #cbd5e1',
+                          background: active ? 'var(--accent-blue)' : '#fff',
+                          color: '#fff',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: '0.64rem',
+                          fontWeight: 900,
+                        }}
+                      >
+                        {active ? '✓' : ''}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            {/* Nivå */}
+            {/* 4. Länder & Koppling */}
             <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                {isSv ? 'Svårighetsgrad:' : 'Difficulty tier:'}
-              </label>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                  🌍 {isSv ? 'Länder (Flerval):' : 'Countries (Multi-select):'}
+                </label>
+                {selectedCountries.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleCountryToggle('all')}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--accent-blue)',
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      padding: 0,
+                    }}
+                  >
+                    {isSv ? `Rensa (${selectedCountries.length})` : `Clear (${selectedCountries.length})`}
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
                 <button
                   type="button"
-                  onClick={() => handleTierChange('easy')}
+                  onClick={() => handleCountryToggle('all')}
                   style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: selectedTier === 'easy' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: selectedTier === 'easy' ? 'var(--tag-bg)' : '#fff',
+                    padding: '6px 10px',
+                    borderRadius: '7px',
+                    border: selectedCountries.length === 0 ? '1.5px solid var(--accent-blue)' : '1px solid var(--border-color)',
+                    background: selectedCountries.length === 0 ? '#e0f2fe' : '#fff',
+                    color: selectedCountries.length === 0 ? 'var(--accent-blue)' : 'var(--text-secondary)',
                     fontWeight: 700,
                     fontSize: '0.74rem',
-                    textAlign: 'center',
+                    cursor: 'pointer',
                   }}
                 >
-                  ⭐ {isSv ? 'Lätt' : 'Easy'}
+                  🌍 {isSv ? 'Alla länder' : 'All countries'}
                 </button>
+
+                {(() => {
+                  const quickSet = new Set<string>(QUICK_COUNTRY_IDS);
+                  const displayed = availableFreePlayCountries.filter(
+                    (c) => quickSet.has(c.id) || selectedCountries.includes(c.id)
+                  );
+                  return displayed.map((c) => {
+                    const active = selectedCountries.includes(c.id);
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => handleCountryToggle(c.id)}
+                        style={{
+                          padding: '6px 9px',
+                          borderRadius: '7px',
+                          border: active ? '1.5px solid #137333' : '1px solid var(--border-color)',
+                          background: active ? '#e6f4ea' : '#fff',
+                          color: active ? '#137333' : 'var(--text-secondary)',
+                          fontWeight: 700,
+                          fontSize: '0.74rem',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                        }}
+                      >
+                        <span>{c.flag}</span>
+                        <span>{c.label}</span>
+                      </button>
+                    );
+                  });
+                })()}
+
                 <button
                   type="button"
-                  onClick={() => handleTierChange('medium')}
+                  onClick={() => setShowMoreCountries((v) => !v)}
                   style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: selectedTier === 'medium' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: selectedTier === 'medium' ? 'var(--tag-bg)' : '#fff',
+                    padding: '6px 9px',
+                    borderRadius: '7px',
+                    border: '1px dashed var(--accent-blue)',
+                    background: showMoreCountries ? '#eff6ff' : '#fff',
+                    color: 'var(--accent-blue)',
                     fontWeight: 700,
                     fontSize: '0.74rem',
-                    textAlign: 'center',
+                    cursor: 'pointer',
                   }}
                 >
-                  📚 {isSv ? 'Medel' : 'Med'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleTierChange('hard')}
-                  style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: selectedTier === 'hard' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: selectedTier === 'hard' ? 'var(--tag-bg)' : '#fff',
-                    fontWeight: 700,
-                    fontSize: '0.74rem',
-                    textAlign: 'center',
-                  }}
-                >
-                  🔥 {isSv ? 'Svår' : 'Hard'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleTierChange('all')}
-                  style={{
-                    padding: '8px 4px',
-                    borderRadius: '8px',
-                    border: selectedTier === 'all' ? '2px solid var(--accent-blue)' : '1px solid var(--border-color)',
-                    background: selectedTier === 'all' ? 'var(--tag-bg)' : '#fff',
-                    fontWeight: 700,
-                    fontSize: '0.74rem',
-                    textAlign: 'center',
-                  }}
-                >
-                  🎲 {isSv ? 'Alla' : 'All'}
+                  {showMoreCountries
+                    ? isSv
+                      ? '▲ Dölj landlista'
+                      : '▲ Hide country list'
+                    : isSv
+                    ? `➕ Fler länder (${availableFreePlayCountries.length})...`
+                    : `➕ More countries (${availableFreePlayCountries.length})...`}
                 </button>
               </div>
-            </div>
 
-            {/* Århundrade */}
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 800, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                {isSv ? 'Tidsperiod / Födelsesekel:' : 'Century:'}
-              </label>
-              <select
-                value={selectedCentury}
-                onChange={(e) => handleCenturyChange(e.target.value)}
+              {showMoreCountries && (
+                <div
+                  style={{
+                    marginTop: '8px',
+                    padding: '8px',
+                    borderRadius: '8px',
+                    background: '#f8fafc',
+                    border: '1px solid var(--border-color)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={countrySearch}
+                    onChange={(e) => setCountrySearch(e.target.value)}
+                    placeholder={isSv ? 'Sök bland alla länder/riken...' : 'Search all countries/empires...'}
+                    style={{
+                      width: '100%',
+                      padding: '6px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border-color)',
+                      fontSize: '0.76rem',
+                      background: '#fff',
+                      outline: 'none',
+                    }}
+                  />
+                  <div
+                    style={{
+                      maxHeight: '150px',
+                      overflowY: 'auto',
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '4px',
+                    }}
+                  >
+                    {availableFreePlayCountries
+                      .filter((c) => !countrySearch.trim() || c.label.toLowerCase().includes(countrySearch.toLowerCase()))
+                      .map((c) => {
+                        const active = selectedCountries.includes(c.id);
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => handleCountryToggle(c.id)}
+                            style={{
+                              padding: '4px 8px',
+                              borderRadius: '6px',
+                              border: active ? '1.5px solid #137333' : '1px solid #e2e8f0',
+                              background: active ? '#e6f4ea' : '#fff',
+                              color: active ? '#137333' : 'var(--text-primary)',
+                              fontWeight: active ? 700 : 600,
+                              fontSize: '0.72rem',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {c.flag} {c.label} <span style={{ opacity: 0.65 }}>({c.count})</span>
+                          </button>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+
+              {/* Vad landkoppling innebär */}
+              <div
                 style={{
-                  width: '100%',
-                  padding: '9px 12px',
+                  marginTop: '8px',
+                  padding: '8px 10px',
                   borderRadius: '8px',
-                  border: '1.5px solid var(--border-color)',
-                  background: '#fff',
-                  fontSize: '0.86rem',
-                  fontWeight: 600,
-                  outline: 'none',
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
                 }}
               >
-                {CENTURIES.map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {isSv ? c.label : c.labelEn}
-                  </option>
-                ))}
-              </select>
+                <div style={{ fontSize: '0.71rem', fontWeight: 700, color: '#475569' }}>
+                  {isSv ? 'Vad innebär koppling till valt land?' : 'What does country connection mean?'}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
+                  {([
+                    { id: 'any' as CountryMatchMode, label: isSv ? 'Alla' : 'Any', icon: '🔗' },
+                    { id: 'citizenship' as CountryMatchMode, label: isSv ? 'Medborgare' : 'Citizen', icon: '🪪' },
+                    { id: 'birth' as CountryMatchMode, label: isSv ? 'Född i' : 'Born in', icon: '🐣' },
+                    { id: 'death' as CountryMatchMode, label: isSv ? 'Död i' : 'Died in', icon: '🪦' },
+                  ]).map((m) => {
+                    const active = countryMatchMode === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => handleCountryMatchModeChange(m.id)}
+                        style={{
+                          padding: '5px 4px',
+                          borderRadius: '6px',
+                          border: active ? '1.5px solid var(--accent-blue)' : '1px solid #cbd5e1',
+                          background: active ? '#e0f2fe' : '#fff',
+                          color: active ? 'var(--accent-blue)' : '#475569',
+                          fontWeight: 700,
+                          fontSize: '0.69rem',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {m.icon} {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: '0.69rem', color: '#64748b', lineHeight: 1.35 }}>
+                  {countryMatchMode === 'any' &&
+                    (isSv
+                      ? 'Träffar personer som var medborgare i landet, föddes där eller dog där (inkl. historiska riken).'
+                      : 'Matches people who were citizens of, born in, or died in the country (incl. historical states).')}
+                  {countryMatchMode === 'citizenship' &&
+                    (isSv
+                      ? 'Träffar endast personer med registrerat medborgarskap/nationalitet i landet i Wikidata (så fungerade Sverige-valet tidigare).'
+                      : 'Matches only people with recorded citizenship/nationality in the country in Wikidata.')}
+                  {countryMatchMode === 'birth' &&
+                    (isSv
+                      ? 'Träffar endast personer vars födelseort ligger i landet.'
+                      : 'Matches only people whose birthplace is located in the country.')}
+                  {countryMatchMode === 'death' &&
+                    (isSv
+                      ? 'Träffar endast personer vars dödsort ligger i landet.'
+                      : 'Matches only people whose place of death is located in the country.')}
+                </div>
+              </div>
             </div>
 
-            {/* Toggle-knappar */}
+            {/* Hel resa toggle */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <button
-                type="button"
-                onClick={handleSwedishToggle}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  padding: '10px 12px',
-                  borderRadius: '10px',
-                  border: onlySwedish ? '1.5px solid #137333' : '1px solid var(--border-color)',
-                  background: onlySwedish ? '#e6f4ea' : '#fff',
-                  fontWeight: 700,
-                  fontSize: '0.84rem',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                <span>🇸🇪 {isSv ? 'Bara personer med svensk koppling' : 'Swedish connection only'}</span>
-                {onlySwedish && <Check size={16} style={{ color: '#137333' }} />}
-              </button>
-
               <button
                 type="button"
                 onClick={() => {
@@ -4384,14 +4948,14 @@ export const GeoGuesserView: React.FC<GeoGuesserViewProps> = ({
                   const nextVal = !requireBothCoords;
                   setRequireBothCoords(nextVal);
                   if (nextVal && (!currentPerson.birthPlace?.coord || (!currentPerson.deathPlace?.coord && currentPerson.deathDate))) {
-                    const candidates = allPeople.filter((p) => {
-                      if (selectedTier !== 'all' && p.tier !== selectedTier) return false;
-                      if (!matchesCentury(p.birthDate.year, selectedCentury)) return false;
-                      if (!matchesLifeStatus(p, lifeStatus)) return false;
-                      if (onlySwedish && !p.swedish) return false;
-                      if (!p.birthPlace?.coord || (!p.deathPlace?.coord && p.deathDate)) return false;
-                      return true;
-                    });
+                    const candidates = filterPeopleWith(
+                      selectedTiers,
+                      selectedCenturies,
+                      lifeStatuses,
+                      selectedCountries,
+                      countryMatchMode,
+                      nextVal
+                    );
                     if (candidates.length > 0) {
                       handleNextPerson(candidates[Math.floor(Math.random() * candidates.length)]!);
                     }

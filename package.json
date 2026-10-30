@@ -11,9 +11,10 @@
     "data:candidates": "tsx pipeline/01-candidates.ts",
     "data:entities": "tsx pipeline/02-entities.ts",
     "data:media": "tsx pipeline/03-media.ts",
+    "data:pageviews": "tsx pipeline/03b-pageviews.ts",
     "data:build": "tsx pipeline/04-build.ts",
     "data:wiki": "tsx pipeline/05-wikipedia.ts",
-    "data": "npm run data:candidates && npm run data:entities && npm run data:media && npm run data:build && npm run data:wiki",
+    "data": "npm run data:candidates && npm run data:entities && npm run data:media && npm run data:pageviews && npm run data:build && npm run data:wiki",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -154,7 +154,7 @@ export function draftCards(
 /** Väljer en bra historisk startperson (t.ex. född mellan 1350 och 1600 med känd dödsdag). */
 export function pickStartPerson(pool: Person[]): Person {
   const starters = pool.filter((p) => {
-    return (p.tier === 'easy' || p.tier === 'medium') &&
+    return (p.tier === 'standard' || p.tier === 'hard') &&
       p.birthDate.year >= 1350 &&
       p.birthDate.year <= 1650 &&
       p.deathDate !== null;
